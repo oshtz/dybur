@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+target/
+*.tsbuildinfo
+
+# Tauri
+apps/tray/src-tauri/target/
+apps/tray/src-tauri/gen/
+apps/tray/src-tauri/nul
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Package manager locks (keep one)
+# Using pnpm
+package-lock.json
+yarn.lock
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+.cache/
+
+# Models (downloaded separately)
+models/
+*.onnx
+
+# Audio test files
+*.wav
+*.mp3
+*.ogg
+
+# Debug files
+*.pdb
+
+# Release artifacts
+*.tar.gz
+*.zip
+*.dmg
+*.exe
+*.msi
