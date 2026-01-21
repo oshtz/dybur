@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dybur</title>
+    <style>
+      :root {
+        --pill-bg: rgba(7, 12, 10, 0.95);
+        --pill-border: rgba(94, 255, 192, 0.35);
+        --pill-glow: rgba(94, 255, 192, 0.05);
+        --pill-shadow: rgba(0, 0, 0, 0.45);
+        --accent: #5effc0;
+        --text: #c9ffe8;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+        background: transparent;
+        color: var(--text);
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .overlay {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      .pill {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 16px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, rgba(6, 10, 8, 0.98), rgba(14, 22, 18, 0.88));
+        border: 1px solid var(--pill-border);
+        box-shadow: 0 0 4px var(--pill-glow);
+        letter-spacing: 0.08em;
+      }
+
+      .pill::before {
+        content: '';
+        position: absolute;
+        inset: 1px;
+        border-radius: 999px;
+        background: repeating-linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.04) 0,
+          rgba(255, 255, 255, 0.04) 2px,
+          transparent 2px,
+          transparent 8px
+        );
+        opacity: 0.35;
+        pointer-events: none;
+      }
+
+      .pill > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 10px rgba(94, 255, 192, 0.6);
+        animation: blink 1.1s steps(2, start) infinite;
+      }
+
+      .label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--accent);
+      }
+
+      .wave {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        height: 22px;
+      }
+
+      .wave span {
+        width: 3px;
+        height: 6px;
+        border-radius: 2px;
+        background: var(--accent);
+        animation: wave 1.2s ease-in-out infinite;
+        opacity: 0.9;
+      }
+
+      .wave span:nth-child(2) {
+        animation-delay: 0.08s;
+      }
+      .wave span:nth-child(3) {
+        animation-delay: 0.16s;
+      }
+      .wave span:nth-child(4) {
+        animation-delay: 0.24s;
+      }
+      .wave span:nth-child(5) {
+        animation-delay: 0.32s;
+      }
+      .wave span:nth-child(6) {
+        animation-delay: 0.4s;
+      }
+      .wave span:nth-child(7) {
+        animation-delay: 0.48s;
+      }
+      .wave span:nth-child(8) {
+        animation-delay: 0.56s;
+      }
+      .wave span:nth-child(9) {
+        animation-delay: 0.64s;
+      }
+      .wave span:nth-child(10) {
+        animation-delay: 0.72s;
+      }
+      .wave span:nth-child(11) {
+        animation-delay: 0.8s;
+      }
+      .wave span:nth-child(12) {
+        animation-delay: 0.88s;
+      }
+
+      @keyframes wave {
+        0%,
+        100% {
+          transform: scaleY(0.4);
+          opacity: 0.5;
+        }
+        50% {
+          transform: scaleY(1.6);
+          opacity: 1;
+        }
+      }
+
+      @keyframes blink {
+        0%,
+        49% {
+          opacity: 1;
+        }
+        50%,
+        100% {
+          opacity: 0.35;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .wave span,
+        .dot {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="overlay" class="overlay" aria-live="polite">
+      <div class="pill">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="status" class="label">REC</span>
+        <div class="wave" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const status = document.getElementById('status');
+
+      // Update label based on recording state (window visibility is controlled by Rust)
+      function updateState(state) {
+        if (state === 'recording') {
+          status.textContent = 'REC';
+        } else if (state === 'processing') {
+          status.textContent = '...';
+        } else {
+          status.textContent = 'IDLE';
+        }
+      }
+
+      // Listen for state changes from Tauri
+      if (window.__TAURI__ && window.__TAURI__.event) {
+        window.__TAURI__.event.listen('recording-state', (event) => {
+          updateState(event.payload);
+        });
+      }
+    </script>
+  </body>
+</html>
