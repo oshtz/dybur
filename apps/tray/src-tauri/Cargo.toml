@@ -1,0 +1,54 @@
+[package]
+name = "dybur-app"
+version = "1.0.0"
+description = "dybur - Local voice dictation"
+authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/oshtz/dybur"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+cpal = "0.15"
+rodio = "0.18"
+chrono = "0.4"
+lazy_static = "1.4"
+
+# ONNX Runtime for STT inference (using dynamic linking to avoid MSVC version issues)
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
+ndarray = "0.17"
+
+# Audio processing for mel spectrograms
+rustfft = "6.2"
+
+# Windows-specific dependencies for native keyboard/clipboard
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi"
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

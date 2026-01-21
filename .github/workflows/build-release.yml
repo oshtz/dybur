@@ -1,0 +1,684 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/tray/src-tauri -> target
+            apps/cli -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build sidecar (CLI binary)
+        shell: pwsh
+        run: |
+          $target = rustc -vV | Select-String "host:" | ForEach-Object { $_.Line.Split(":")[1].Trim() }
+          Write-Host "Building sidecar for target: $target"
+
+          Push-Location apps/cli
+          cargo build --release
+          Pop-Location
+
+          $binaryDir = "apps/tray/src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $binaryDir | Out-Null
+
+          Copy-Item "apps/cli/target/release/dybur.exe" "$binaryDir/dybur-$target.exe"
+          Write-Host "Sidecar built and copied to $binaryDir/dybur-$target.exe"
+
+      - name: Build TypeScript packages
+        run: pnpm build
+
+      - name: Build Tauri app (no bundles)
+        working-directory: apps/tray
+        run: pnpm tauri build --no-bundle
+
+      - name: Debug - List build artifacts
+        shell: pwsh
+        run: |
+          Write-Host "=== Contents of target/release ==="
+          Get-ChildItem -Path "apps/tray/src-tauri/target/release" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "  $($_.Name) - $sizeMB MB"
+            }
+
+          Write-Host "`n=== All DLLs in target directory (recursive) ==="
+          Get-ChildItem -Path "apps/tray/src-tauri/target" -Filter "*.dll" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 1MB } |
+            Sort-Object -Property Length -Descending |
+            Select-Object -First 20 |
+            ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "  $($_.FullName) - $sizeMB MB"
+            }
+
+          Write-Host "`n=== Checking ort cache directories ==="
+          # ort 2.x uses different cache locations
+          $ortCacheLocations = @(
+            (Join-Path $env:USERPROFILE ".ort"),
+            (Join-Path $env:LOCALAPPDATA "ort"),
+            (Join-Path $env:USERPROFILE ".cache\ort")
+          )
+          foreach ($ortCache in $ortCacheLocations) {
+            Write-Host "Checking: $ortCache"
+            if (Test-Path $ortCache) {
+              Get-ChildItem -Path $ortCache -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  $sizeMB = [math]::Round($_.Length / 1MB, 2)
+                  Write-Host "  $($_.FullName) - $sizeMB MB"
+                }
+            } else {
+              Write-Host "  Not found"
+            }
+          }
+
+          Write-Host "`n=== Searching entire target for any onnx/ort DLLs ==="
+          Get-ChildItem -Path "apps/tray/src-tauri/target" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "onnx|ort|directml" } |
+            ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "  $($_.FullName) - $sizeMB MB"
+            }
+
+      - name: Cache Enigma Virtual Box installer
+        id: cache-evb
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/enigmavb_setup.exe
+          key: enigmavb-installer-v1
+
+      - name: Download Enigma Virtual Box installer
+        if: steps.cache-evb.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $evbUrls = @(
+            "https://www.enigmaprotector.com/assets/files/enigmavb.exe",
+            "https://enigmaprotector.com/assets/files/enigmavb.exe",
+            "https://web.archive.org/web/2024/https://enigmaprotector.com/assets/files/enigmavb.exe"
+          )
+          $evbInstaller = Join-Path $env:RUNNER_TEMP "enigmavb_setup.exe"
+          Remove-Item -Path $evbInstaller -Force -ErrorAction SilentlyContinue
+
+          $downloaded = $false
+          foreach ($evbUrl in $evbUrls) {
+            Write-Host "Trying: $evbUrl"
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                $headers = @{
+                  "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                  "Accept" = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                }
+                Invoke-WebRequest -Uri $evbUrl -OutFile $evbInstaller -UseBasicParsing -Headers $headers -MaximumRedirection 5 -TimeoutSec 60
+
+                if ((Test-Path $evbInstaller) -and (Get-Item $evbInstaller).Length -gt 1MB) {
+                  $downloaded = $true
+                  Write-Host "Downloaded successfully from $evbUrl"
+                  break
+                }
+              } catch {
+                Write-Host "Attempt $attempt failed: $_"
+                Start-Sleep -Seconds 5
+              }
+            }
+            if ($downloaded) { break }
+          }
+
+          if (-not $downloaded) {
+            throw "Failed to download EVB installer. The enigmaprotector.com site may be blocking CI downloads. Try running the workflow again (cache will persist)."
+          }
+
+      - name: Install Enigma Virtual Box
+        shell: pwsh
+        run: |
+          $evbInstaller = Join-Path $env:RUNNER_TEMP "enigmavb_setup.exe"
+
+          if (-not (Test-Path $evbInstaller)) {
+            throw "EVB installer not found at $evbInstaller"
+          }
+
+          $process = Start-Process -FilePath $evbInstaller -ArgumentList "/VERYSILENT","/NORESTART" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "EVB installer failed with exit code $($process.ExitCode)"
+          }
+
+          if (Test-Path "C:\Program Files (x86)\Enigma Virtual Box\enigmavbconsole.exe") {
+            Write-Host "EVB installed successfully"
+          } else {
+            throw "EVB installation failed"
+          }
+
+      - name: Create portable exe
+        shell: pwsh
+        run: |
+          # Debug: List all exe files in the target directory with sizes
+          Write-Host "=== All exe files in target directory ==="
+          Get-ChildItem -Path "apps/tray/src-tauri/target" -Recurse -Filter "*.exe" |
+            Where-Object { $_.FullName -notmatch "\\deps\\" -and $_.FullName -notmatch "\\build\\" } |
+            ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "$($_.FullName) - $sizeMB MB"
+            }
+          Write-Host "========================================="
+
+          # Debug: List all DLL files in the release directory
+          Write-Host "=== All DLL files in release directory ==="
+          Get-ChildItem -Path "apps/tray/src-tauri/target/release" -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "$($_.Name) - $sizeMB MB"
+            }
+          Write-Host "========================================="
+
+          # Look for dybur-app.exe first (the main tray app)
+          $inputExe = $null
+          $mainExePath = "apps/tray/src-tauri/target/release/dybur-app.exe"
+
+          if (Test-Path $mainExePath) {
+            $inputExe = (Resolve-Path $mainExePath).Path
+            $sizeMB = [math]::Round((Get-Item $inputExe).Length / 1MB, 2)
+            Write-Host "Found main exe at expected location: $inputExe ($sizeMB MB)"
+          } else {
+            Write-Host "Main exe not found at $mainExePath, searching..."
+
+            # Search for the largest dybur exe in release folder (should be the tray app)
+            $searchRoot = "apps/tray/src-tauri/target/release"
+            if (Test-Path $searchRoot) {
+              $candidates = Get-ChildItem -Path $searchRoot -Filter "*.exe" |
+                Where-Object {
+                  $_.Name -match "^dybur" -and
+                  $_.Name -notmatch "sidecar"
+                } |
+                Sort-Object -Property Length -Descending
+
+              Write-Host "Candidate exe files:"
+              foreach ($c in $candidates) {
+                $sizeMB = [math]::Round($c.Length / 1MB, 2)
+                Write-Host "  $($c.Name) - $sizeMB MB"
+              }
+
+              if ($candidates.Count -gt 0) {
+                $inputExe = $candidates[0].FullName
+              }
+            }
+          }
+
+          if (-not $inputExe) {
+            Write-Host "ERROR: Could not find release exe"
+            throw "Release exe not found"
+          }
+
+          $inputSize = [math]::Round((Get-Item $inputExe).Length / 1MB, 2)
+          Write-Host "Selected input exe: $inputExe ($inputSize MB)"
+
+          # Sanity check: The tray app should be at least 5MB
+          if ($inputSize -lt 5) {
+            Write-Host "WARNING: Selected exe is smaller than expected ($inputSize MB). This might be the wrong binary!"
+          }
+          $outputExe = Join-Path (Split-Path $inputExe -Parent) "dybur-portable.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path $outputExe) | Out-Null
+
+          # Setup EVB staging directory
+          $evbStaging = Join-Path $PWD "evb-staging"
+          New-Item -ItemType Directory -Force -Path $evbStaging | Out-Null
+
+          # Find and copy WebView2Loader.dll
+          $webviewDll = Get-ChildItem -Path "apps/tray/src-tauri/target" -Filter "WebView2Loader.dll" -Recurse | Select-Object -First 1
+          if (-not $webviewDll) {
+            throw "WebView2Loader.dll not found"
+          }
+          Copy-Item -Path $webviewDll.FullName -Destination $evbStaging -Force
+          Write-Host "Included WebView2Loader.dll: $($webviewDll.FullName)"
+
+          # Find and copy ONNX runtime DLLs
+          # The ort crate with copy-dylibs feature should place these next to the exe
+          $releaseDir = "apps/tray/src-tauri/target/release"
+          $targetDir = "apps/tray/src-tauri/target"
+
+          # List of required ONNX-related DLLs
+          $onnxDlls = @("onnxruntime.dll", "DirectML.dll")
+
+          # First try the release directory
+          foreach ($dllName in $onnxDlls) {
+            $dllPath = Join-Path $releaseDir $dllName
+            if (Test-Path $dllPath) {
+              Copy-Item -Path $dllPath -Destination $evbStaging -Force
+              $sizeMB = [math]::Round((Get-Item $dllPath).Length / 1MB, 2)
+              Write-Host "Included $dllName from release dir ($sizeMB MB)"
+            }
+          }
+
+          # Search entire target directory for ONNX DLLs if not found in release
+          Write-Host "Searching for ONNX runtime DLLs in target directory..."
+          $foundDlls = Get-ChildItem -Path $targetDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "^(onnxruntime|DirectML)" -and $_.Length -gt 1MB }
+
+          foreach ($dll in $foundDlls) {
+            $destPath = Join-Path $evbStaging $dll.Name
+            if (-not (Test-Path $destPath)) {
+              Copy-Item -Path $dll.FullName -Destination $evbStaging -Force
+              $sizeMB = [math]::Round($dll.Length / 1MB, 2)
+              Write-Host "Included $($dll.Name) from $($dll.Directory.Name) ($sizeMB MB)"
+            }
+          }
+
+          # Check all ort cache directories (ort 2.x uses different locations)
+          $ortCacheDirs = @(
+            (Join-Path $env:USERPROFILE ".ort"),
+            (Join-Path $env:LOCALAPPDATA "ort"),
+            (Join-Path $env:USERPROFILE ".cache\ort")
+          )
+          foreach ($ortCacheDir in $ortCacheDirs) {
+            if (Test-Path $ortCacheDir) {
+              Write-Host "Checking ort cache: $ortCacheDir"
+              Get-ChildItem -Path $ortCacheDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match "^(onnxruntime|DirectML)" -and $_.Length -gt 1MB } |
+                ForEach-Object {
+                  $destPath = Join-Path $evbStaging $_.Name
+                  if (-not (Test-Path $destPath)) {
+                    Copy-Item -Path $_.FullName -Destination $evbStaging -Force
+                    $sizeMB = [math]::Round($_.Length / 1MB, 2)
+                    Write-Host "Included $($_.Name) from ort cache ($sizeMB MB)"
+                  }
+                }
+            }
+          }
+
+          # Check ORT_DYLIB_PATH if set
+          if ($env:ORT_DYLIB_PATH -and (Test-Path $env:ORT_DYLIB_PATH)) {
+            Write-Host "Checking ORT_DYLIB_PATH: $env:ORT_DYLIB_PATH"
+            $ortDir = Split-Path $env:ORT_DYLIB_PATH -Parent
+            Get-ChildItem -Path $ortDir -Filter "*.dll" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "^(onnxruntime|DirectML)" -and $_.Length -gt 1MB } |
+              ForEach-Object {
+                $destPath = Join-Path $evbStaging $_.Name
+                if (-not (Test-Path $destPath)) {
+                  Copy-Item -Path $_.FullName -Destination $evbStaging -Force
+                  $sizeMB = [math]::Round($_.Length / 1MB, 2)
+                  Write-Host "Included $($_.Name) from ORT_DYLIB_PATH ($sizeMB MB)"
+                }
+              }
+          }
+
+          # Verify we have at least one ONNX runtime DLL - if not, download it
+          $hasOnnxRuntime = Get-ChildItem -Path $evbStaging -Filter "onnxruntime*.dll" -ErrorAction SilentlyContinue
+          if (-not $hasOnnxRuntime) {
+            Write-Host "ONNX runtime DLL not found in cache locations. Downloading directly..."
+
+            # Download ONNX Runtime 1.19.2 (compatible with ort 2.0.0-rc.11)
+            $ortVersion = "1.19.2"
+            $ortUrl = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
+            $ortZip = Join-Path $env:RUNNER_TEMP "onnxruntime.zip"
+            $ortExtract = Join-Path $env:RUNNER_TEMP "onnxruntime"
+
+            Write-Host "Downloading ONNX Runtime v$ortVersion..."
+            Invoke-WebRequest -Uri $ortUrl -OutFile $ortZip -UseBasicParsing
+
+            Write-Host "Extracting ONNX Runtime..."
+            Expand-Archive -Path $ortZip -DestinationPath $ortExtract -Force
+
+            # Find and copy the DLLs
+            $ortDlls = Get-ChildItem -Path $ortExtract -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "^onnxruntime" }
+            foreach ($dll in $ortDlls) {
+              $destPath = Join-Path $evbStaging $dll.Name
+              if (-not (Test-Path $destPath)) {
+                Copy-Item -Path $dll.FullName -Destination $evbStaging -Force
+                $sizeMB = [math]::Round($dll.Length / 1MB, 2)
+                Write-Host "Included $($dll.Name) from direct download ($sizeMB MB)"
+              }
+            }
+
+            # Verify again after download
+            $hasOnnxRuntime = Get-ChildItem -Path $evbStaging -Filter "onnxruntime*.dll" -ErrorAction SilentlyContinue
+            if (-not $hasOnnxRuntime) {
+              Write-Host "ERROR: Failed to obtain ONNX runtime DLL even after direct download!"
+              throw "Critical dependency missing: onnxruntime.dll not found"
+            }
+          }
+
+          # Include the CLI sidecar in the portable bundle
+          $sidecarPath = "apps/tray/src-tauri/binaries/dybur-x86_64-pc-windows-msvc.exe"
+          if (Test-Path $sidecarPath) {
+            Copy-Item -Path $sidecarPath -Destination $evbStaging -Force
+            Write-Host "Included sidecar: $sidecarPath"
+          } else {
+            Write-Host "Warning: Sidecar not found at $sidecarPath"
+          }
+
+          # Show what's in the staging directory
+          Write-Host "=== EVB Staging directory contents ==="
+          Get-ChildItem -Path $evbStaging | ForEach-Object {
+            $sizeMB = [math]::Round($_.Length / 1MB, 2)
+            Write-Host "  $($_.Name) - $sizeMB MB"
+          }
+          Write-Host "======================================="
+
+          # Generate EVB project file
+          $evbProject = Join-Path $PWD "dybur.evb"
+          pnpm --package=@insco/enigma-virtualbox dlx enigmavirtualbox generate $evbStaging --input $inputExe --output $outputExe --project-name $evbProject
+          if ($LASTEXITCODE -ne 0) {
+            throw "enigmavirtualbox generate failed"
+          }
+
+          # Run EVB console
+          $evbConsole = "C:\Program Files (x86)\Enigma Virtual Box\enigmavbconsole.exe"
+          if (-not (Test-Path $evbConsole)) {
+            throw "enigmavbconsole.exe not found at $evbConsole"
+          }
+          & $evbConsole $evbProject
+          if ($LASTEXITCODE -ne 0) {
+            throw "enigmavbconsole failed"
+          }
+
+          if (Test-Path $outputExe) {
+            $size = [math]::Round((Get-Item $outputExe).Length / 1MB, 2)
+            Write-Host "Portable exe created: $size MB"
+
+            # Validate the output is a reasonable size
+            # ONNX runtime alone is ~10-20MB, so the portable should be at least 15MB
+            if ($size -lt 15) {
+              Write-Host "ERROR: Portable exe is too small ($size MB). Expected at least 15MB."
+              Write-Host "This indicates missing dependencies (ONNX runtime, etc.)"
+              throw "Portable exe validation failed: size $size MB is below minimum 15MB"
+            }
+
+            Write-Host "SUCCESS: Portable exe size validation passed ($size MB)"
+          } else {
+            throw "Failed to create portable exe"
+          }
+          "PORTABLE_EXE_PATH=$outputExe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: dybur-portable-windows
+          path: ${{ env.PORTABLE_EXE_PATH }}
+
+      - name: Determine release tag
+        id: release_tag
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if (-not $version) {
+            throw "package.json version not found"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Check for existing release
+        id: release_check
+        if: github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.release_tag.outputs.tag }}';
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag
+              });
+              core.setOutput('exists', 'true');
+            } catch (error) {
+              core.setOutput('exists', 'false');
+            }
+
+      - name: Publish release artifact (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            ${{ env.PORTABLE_EXE_PATH }}
+
+      - name: Publish release artifact (main create)
+        if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            ${{ env.PORTABLE_EXE_PATH }}
+
+      - name: Publish release artifact (main existing)
+        if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          files: |
+            ${{ env.PORTABLE_EXE_PATH }}
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check Apple signing secrets
+        id: apple-secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          if [ -z "$APPLE_CERTIFICATE" ]; then missing=1; fi
+          if [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then missing=1; fi
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then missing=1; fi
+          if [ -z "$APPLE_ID" ]; then missing=1; fi
+          if [ -z "$APPLE_PASSWORD" ]; then missing=1; fi
+          if [ -z "$APPLE_TEAM_ID" ]; then missing=1; fi
+
+          if [ "$missing" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Apple signing secrets not configured; building unsigned app."
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/tray/src-tauri -> target
+            apps/cli -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install macOS build dependencies
+        run: brew install create-dmg
+
+      - name: Build sidecar for Apple Silicon
+        run: |
+          cd apps/cli
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p ../tray/src-tauri/binaries
+          cp target/aarch64-apple-darwin/release/dybur ../tray/src-tauri/binaries/dybur-aarch64-apple-darwin
+
+      - name: Build TypeScript packages
+        run: pnpm build
+
+      - name: Import Apple signing certificate
+        if: steps.apple-secrets.outputs.available == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+          rm certificate.p12
+
+      - name: Build Tauri app (signed)
+        if: steps.apple-secrets.outputs.available == 'true'
+        working-directory: apps/tray
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Build Tauri app (unsigned)
+        if: steps.apple-secrets.outputs.available != 'true'
+        working-directory: apps/tray
+        run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Find built artifacts
+        id: find-artifacts
+        run: |
+          DMG_PATH=$(find apps/tray/src-tauri/target -name "*.dmg" -type f | head -1)
+          APP_PATH=$(find apps/tray/src-tauri/target -name "*.app" -type d | head -1)
+
+          if [ -n "$DMG_PATH" ]; then
+            echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+            echo "Found DMG: $DMG_PATH"
+          fi
+
+          if [ -n "$APP_PATH" ]; then
+            # Create a zip of the .app bundle
+            APP_DIR=$(dirname "$APP_PATH")
+            APP_NAME=$(basename "$APP_PATH")
+            ZIP_PATH="$APP_DIR/dybur-macos.zip"
+            cd "$APP_DIR" && zip -r "dybur-macos.zip" "$APP_NAME"
+            echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+            echo "Created ZIP: $ZIP_PATH"
+          fi
+
+      - name: Upload macOS DMG
+        if: steps.find-artifacts.outputs.dmg_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dybur-macos-dmg
+          path: ${{ steps.find-artifacts.outputs.dmg_path }}
+
+      - name: Upload macOS App ZIP
+        if: steps.find-artifacts.outputs.zip_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dybur-macos-app
+          path: ${{ steps.find-artifacts.outputs.zip_path }}
+
+      - name: Determine release tag
+        id: release_tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing release
+        id: release_check
+        if: github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.release_tag.outputs.tag }}';
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag
+              });
+              core.setOutput('exists', 'true');
+            } catch (error) {
+              core.setOutput('exists', 'false');
+            }
+
+      - name: Publish release artifacts (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            ${{ steps.find-artifacts.outputs.dmg_path }}
+            ${{ steps.find-artifacts.outputs.zip_path }}
+
+      - name: Publish release artifacts (main create)
+        if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            ${{ steps.find-artifacts.outputs.dmg_path }}
+            ${{ steps.find-artifacts.outputs.zip_path }}
+
+      - name: Publish release artifacts (main existing)
+        if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          files: |
+            ${{ steps.find-artifacts.outputs.dmg_path }}
+            ${{ steps.find-artifacts.outputs.zip_path }}
