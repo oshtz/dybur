@@ -1,6 +1,6 @@
 [package]
 name = "dybur-app"
-version = "1.0.0"
+version = "1.1.0"
 description = "dybur - Local voice dictation"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
 license = "MIT"
@@ -17,6 +17,7 @@ tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
+ureq = { version = "2.9", features = ["tls"] }
 cpal = "0.15"
 rodio = "0.18"
 chrono = "0.4"
