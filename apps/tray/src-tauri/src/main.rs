@@ -994,21 +994,32 @@ fn toggle_recording(app: &tauri::AppHandle) {
                 } else {
                     log_info!(
                         "model",
-                        "Transcribed in {}ms ({}x realtime): '{}'",
+                        "Transcribed {} chars in {}ms ({}x realtime)",
+                        result.text.len(),
                         result.inference_time_ms,
-                        format!("{:.1}", result.audio_duration_s * 1000.0 / result.inference_time_ms as f32),
-                        result.text
+                        format!("{:.1}", result.audio_duration_s * 1000.0 / result.inference_time_ms as f32)
                     );
                     
-                    // Inject the text into the active application
-                    match inject_text(&result.text, restore_clipboard) {
-                        Ok(()) => {
-                            log_info!("injection", "Text injected successfully");
-                            update_tray_status(app, "Done");
-                        }
-                        Err(e) => {
-                            log_error!("injection", "Failed to inject text: {}", e);
-                            update_tray_status(app, "Injection failed");
+                    // Check if FTUE window exists - if so, emit directly instead of clipboard paste
+                    // (clipboard paste doesn't work reliably in our own webview windows)
+                    let ftue_exists = app.get_webview_window("ftue").is_some();
+
+                    if ftue_exists {
+                        // Emit transcription directly to FTUE window
+                        let _ = app.emit_to("ftue", "ftue:transcription", &result.text);
+                        log_info!("injection", "Text emitted to FTUE window");
+                        update_tray_status(app, "Done");
+                    } else {
+                        // Inject the text into the active application
+                        match inject_text(&result.text, restore_clipboard) {
+                            Ok(()) => {
+                                log_info!("injection", "Text injected successfully");
+                                update_tray_status(app, "Done");
+                            }
+                            Err(e) => {
+                                log_error!("injection", "Failed to inject text: {}", e);
+                                update_tray_status(app, "Injection failed");
+                            }
                         }
                     }
                 }

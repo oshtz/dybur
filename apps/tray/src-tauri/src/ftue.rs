@@ -388,6 +388,19 @@ pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
         match download_model_sync(DEFAULT_MODEL, "int8") {
             Ok(_) => {
                 crate::log_info!("ftue", "Model download completed");
+
+                // Load the model so user can dictate immediately without restart
+                if let Some(stt_config) = crate::stt::get_model_paths(DEFAULT_MODEL) {
+                    let mut engine = crate::STT_ENGINE.lock().unwrap();
+                    match engine.load(stt_config) {
+                        Ok(()) => {
+                            crate::log_info!("ftue", "STT model loaded and ready");
+                        }
+                        Err(e) => {
+                            crate::log_error!("ftue", "Failed to load STT model after download: {}", e);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 crate::log_error!("ftue", "Model download failed: {}", e);
@@ -453,7 +466,7 @@ pub fn show_ftue_window(app: &AppHandle) -> Result<(), String> {
         WebviewUrl::App("ftue.html".into()),
     )
     .title("Welcome to dybur")
-    .inner_size(500.0, 600.0)
+    .inner_size(550.0, 700.0)
     .resizable(false)
     .center()
     .decorations(true)

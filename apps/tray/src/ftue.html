@@ -292,6 +292,62 @@
         margin-top: 12px;
       }
 
+      .tutorial-steps {
+        text-align: left;
+        margin: 16px 0 0 0;
+        padding-left: 24px;
+        font-size: 14px;
+        color: var(--text-secondary);
+      }
+
+      .tutorial-steps li {
+        margin-bottom: 8px;
+      }
+
+      .tutorial-steps li:last-child {
+        margin-bottom: 0;
+      }
+
+      .tutorial-steps strong {
+        color: var(--accent);
+      }
+
+      /* Test Dictation Box */
+      .test-dictation-box {
+        margin-top: 16px;
+      }
+
+      .test-dictation-box label {
+        display: block;
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-bottom: 8px;
+      }
+
+      .test-dictation-input {
+        width: 100%;
+        padding: 12px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text-primary);
+        font-family: inherit;
+        font-size: 14px;
+        resize: none;
+        box-sizing: border-box;
+      }
+
+      .test-dictation-input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(94, 255, 192, 0.1);
+      }
+
+      .test-dictation-input::placeholder {
+        color: var(--text-secondary);
+        opacity: 0.7;
+      }
+
       /* Privacy Banner */
       .privacy-banner {
         display: flex;
@@ -594,13 +650,26 @@
           <p class="step-description">Let's test that everything is working!</p>
 
           <div class="tutorial-box">
-            <p>Press this hotkey to start and stop dictation:</p>
             <div class="hotkey-display" id="hotkey-display">
               <span class="key">Ctrl</span>
               <span class="key">Shift</span>
               <span class="key">Space</span>
             </div>
-            <p class="tutorial-hint">Try saying "Hello, dybur" and watch the magic happen!</p>
+            <ol class="tutorial-steps">
+              <li>Press the hotkey to <strong>start</strong> recording</li>
+              <li>Say something (e.g. "Hello, this is a test")</li>
+              <li>Press the hotkey again to <strong>stop</strong> and transcribe</li>
+            </ol>
+          </div>
+
+          <div class="test-dictation-box">
+            <label for="test-dictation-input">Your transcription will appear here:</label>
+            <textarea
+              id="test-dictation-input"
+              class="test-dictation-input"
+              placeholder="Click here first, then use the hotkey above..."
+              rows="3"
+            ></textarea>
           </div>
 
           <div class="buttons">
@@ -713,6 +782,15 @@
             document.getElementById('step4-download').textContent = 'Retry Download';
           });
         }
+
+        // Listen for transcription results from dictation test
+        await tauriEvent.listen('ftue:transcription', (e) => {
+          const testInput = document.getElementById('test-dictation-input');
+          if (testInput) {
+            testInput.value = e.payload;
+            testInput.focus();
+          }
+        });
       });
 
       function updateHotkeyDisplay(hotkey) {
@@ -759,6 +837,16 @@
         // Run step-specific actions
         if (step === 2) {
           runSystemCheck();
+        }
+
+        // Auto-focus the test dictation input when reaching step 5
+        if (step === 5) {
+          setTimeout(() => {
+            const testInput = document.getElementById('test-dictation-input');
+            if (testInput) {
+              testInput.focus();
+            }
+          }, 100);
         }
       }
 
