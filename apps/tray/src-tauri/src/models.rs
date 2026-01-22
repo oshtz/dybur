@@ -194,6 +194,9 @@ pub fn get_model_metadata(model_name: &str) -> Option<ModelMetadata> {
 /// Download a model synchronously (blocking)
 /// This is used for the tray app which runs downloads in a separate thread
 pub fn download_model_sync(model_name: &str, variant: &str) -> Result<PathBuf, String> {
+    use crate::state::{DownloadState, DOWNLOAD_STATE, DOWNLOAD_IN_PROGRESS};
+    use std::sync::atomic::Ordering;
+
     let model_dir = get_model_path(model_name);
 
     // Check if already installed
@@ -201,9 +204,19 @@ pub fn download_model_sync(model_name: &str, variant: &str) -> Result<PathBuf, S
         return Ok(model_dir);
     }
 
+    // Check if download already in progress
+    if DOWNLOAD_IN_PROGRESS.load(Ordering::SeqCst) {
+        return Err("A download is already in progress".to_string());
+    }
+
+    // Mark download as in progress
+    DOWNLOAD_IN_PROGRESS.store(true, Ordering::SeqCst);
+
     // Create model directory
-    fs::create_dir_all(&model_dir)
-        .map_err(|e| format!("Failed to create model directory: {}", e))?;
+    if let Err(e) = fs::create_dir_all(&model_dir) {
+        DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        return Err(format!("Failed to create model directory: {}", e));
+    }
 
     let files = if variant == "int8" {
         MODEL_FILES_INT8
@@ -211,22 +224,65 @@ pub fn download_model_sync(model_name: &str, variant: &str) -> Result<PathBuf, S
         MODEL_FILES_FULL
     };
 
+    let total_files = files.len();
     let mut total_downloaded = 0u64;
     let mut downloaded_files = Vec::new();
 
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
         let url = format!("{}/{}", MODEL_BASE_URL, file);
         let dest_path = model_dir.join(file);
 
-        crate::log_info!("models", "Downloading {}...", file);
+        // Update download state at start of file
+        {
+            let mut state = DOWNLOAD_STATE.write().unwrap();
+            *state = DownloadState::Downloading {
+                model_name: model_name.to_string(),
+                current_file: file.to_string(),
+                file_index: index,
+                total_files,
+                bytes_downloaded: total_downloaded,
+                total_bytes: 0, // We don't know total until complete
+                file_bytes_downloaded: 0,
+                file_total_bytes: 0,
+            };
+        }
 
-        match download_file_sync(&url, &dest_path) {
+        crate::log_info!("models", "Downloading {} ({}/{})...", file, index + 1, total_files);
+
+        // Create progress callback that updates the global state
+        let model_name_clone = model_name.to_string();
+        let file_clone = file.to_string();
+        let total_downloaded_base = total_downloaded;
+        let progress_callback: ProgressCallback = Box::new(move |file_downloaded, file_total| {
+            let mut state = DOWNLOAD_STATE.write().unwrap();
+            *state = DownloadState::Downloading {
+                model_name: model_name_clone.clone(),
+                current_file: file_clone.clone(),
+                file_index: index,
+                total_files,
+                bytes_downloaded: total_downloaded_base,
+                total_bytes: 0,
+                file_bytes_downloaded: file_downloaded,
+                file_total_bytes: file_total,
+            };
+        });
+
+        match download_file_with_progress(&url, &dest_path, Some(progress_callback)) {
             Ok(size) => {
                 total_downloaded += size;
                 downloaded_files.push(file.to_string());
                 crate::log_info!("models", "Downloaded {} ({} bytes)", file, size);
             }
             Err(e) => {
+                // Update state to failed
+                {
+                    let mut state = DOWNLOAD_STATE.write().unwrap();
+                    *state = DownloadState::Failed {
+                        model_name: model_name.to_string(),
+                        error: e.clone(),
+                    };
+                }
+                DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
                 // Clean up partial download
                 let _ = fs::remove_dir_all(&model_dir);
                 return Err(format!("Failed to download {}: {}", file, e));
@@ -259,89 +315,109 @@ pub fn download_model_sync(model_name: &str, variant: &str) -> Result<PathBuf, S
         total_downloaded
     );
 
+    // Update state to completed
+    {
+        let mut state = DOWNLOAD_STATE.write().unwrap();
+        *state = DownloadState::Completed {
+            model_name: model_name.to_string(),
+        };
+    }
+    DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+
     Ok(model_dir)
 }
 
-/// Download a single file synchronously
-fn download_file_sync(url: &str, dest_path: &PathBuf) -> Result<u64, String> {
-    // Use ureq for blocking HTTP requests (lighter than reqwest for sync)
-    // Since we don't have ureq, we'll use std::process::Command with curl/powershell
+/// Check if a download is currently in progress
+pub fn is_download_in_progress() -> bool {
+    use crate::state::DOWNLOAD_IN_PROGRESS;
+    use std::sync::atomic::Ordering;
+    DOWNLOAD_IN_PROGRESS.load(Ordering::SeqCst)
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        download_file_windows(url, dest_path)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        download_file_curl(url, dest_path)
+/// Get current download status string for tray menu
+pub fn get_download_status() -> Option<String> {
+    use crate::state::{DownloadState, DOWNLOAD_STATE};
+    let state = DOWNLOAD_STATE.read().unwrap();
+    match &*state {
+        DownloadState::Idle => None,
+        DownloadState::Downloading { current_file, file_index, total_files, .. } => {
+            Some(format!("Downloading: {} ({}/{})", current_file, file_index + 1, total_files))
+        }
+        DownloadState::Completed { model_name } => {
+            Some(format!("Completed: {}", model_name))
+        }
+        DownloadState::Failed { error, .. } => {
+            Some(format!("Failed: {}", error))
+        }
     }
 }
 
-#[cfg(target_os = "windows")]
-fn download_file_windows(url: &str, dest_path: &PathBuf) -> Result<u64, String> {
-    use std::process::Command;
+/// Callback for download progress updates
+pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send>;
 
-    let dest_str = dest_path.to_string_lossy();
+/// Download a single file synchronously with optional progress callback
+fn download_file_sync(url: &str, dest_path: &PathBuf) -> Result<u64, String> {
+    download_file_with_progress(url, dest_path, None)
+}
 
-    // Try curl first (available on Windows 10+)
-    let curl_result = Command::new("curl")
-        .args(["-L", "-o", &dest_str, url])
-        .output();
+/// Download a single file with progress reporting
+pub fn download_file_with_progress(
+    url: &str,
+    dest_path: &PathBuf,
+    progress_callback: Option<ProgressCallback>,
+) -> Result<u64, String> {
+    use std::io::{Read, Write};
 
-    if let Ok(output) = curl_result {
-        if output.status.success() {
-            let size = fs::metadata(dest_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            return Ok(size);
+    // Make HTTP request with ureq (no terminal window needed)
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    // Get content length if available
+    let content_length: u64 = response
+        .header("content-length")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    // Create output file
+    let mut file = fs::File::create(dest_path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+
+    // Read response body in chunks with progress reporting
+    let mut reader = response.into_reader();
+    let mut buffer = [0u8; 65536]; // 64KB buffer
+    let mut total_downloaded: u64 = 0;
+    let mut last_progress_report: u64 = 0;
+
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read from response: {}", e))?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..bytes_read])
+            .map_err(|e| format!("Failed to write to file: {}", e))?;
+
+        total_downloaded += bytes_read as u64;
+
+        // Report progress every 100KB or so to avoid flooding
+        if let Some(ref callback) = progress_callback {
+            if total_downloaded - last_progress_report >= 102400 || bytes_read == 0 {
+                callback(total_downloaded, content_length);
+                last_progress_report = total_downloaded;
+            }
         }
     }
 
-    // Fall back to PowerShell
-    let ps_cmd = format!(
-        "Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-        url, dest_str
-    );
-
-    let output = Command::new("powershell")
-        .args(["-Command", &ps_cmd])
-        .output()
-        .map_err(|e| format!("Failed to execute download command: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Download failed: {}", stderr));
+    // Final progress callback
+    if let Some(callback) = progress_callback {
+        callback(total_downloaded, content_length);
     }
 
-    let size = fs::metadata(dest_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    Ok(size)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn download_file_curl(url: &str, dest_path: &PathBuf) -> Result<u64, String> {
-    use std::process::Command;
-
-    let dest_str = dest_path.to_string_lossy();
-
-    let output = Command::new("curl")
-        .args(["-L", "-o", &dest_str, url])
-        .output()
-        .map_err(|e| format!("Failed to execute curl: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Download failed: {}", stderr));
-    }
-
-    let size = fs::metadata(dest_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    Ok(size)
+    Ok(total_downloaded)
 }
 
 /// Remove a model

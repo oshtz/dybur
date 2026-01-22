@@ -362,8 +362,8 @@ fn inject_text_internal(text: &str, restore_clipboard: bool) -> Result<(), Strin
 
     // Restore original clipboard if needed
     if let Some(original) = original_clipboard {
-        // Wait a bit before restoring to ensure paste completes
-        std::thread::sleep(Duration::from_millis(100));
+        // Wait before restoring to ensure paste completes (webviews need more time)
+        std::thread::sleep(Duration::from_millis(300));
         Clipboard::set(&original)?;
     }
 
