@@ -74,3 +74,76 @@ impl Default for AppState {
         Self::new()
     }
 }
+
+/// Model download state for tracking progress
+#[derive(Debug, Clone)]
+pub enum DownloadState {
+    /// No download in progress
+    Idle,
+    /// Download in progress
+    Downloading {
+        model_name: String,
+        current_file: String,
+        file_index: usize,
+        total_files: usize,
+        bytes_downloaded: u64,
+        total_bytes: u64,
+        /// Bytes downloaded for the current file
+        file_bytes_downloaded: u64,
+        /// Total bytes for the current file (if known)
+        file_total_bytes: u64,
+    },
+    /// Download completed
+    Completed {
+        model_name: String,
+    },
+    /// Download failed
+    Failed {
+        model_name: String,
+        error: String,
+    },
+}
+
+impl Default for DownloadState {
+    fn default() -> Self {
+        DownloadState::Idle
+    }
+}
+
+/// Global download state (separate from AppState for thread safety)
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
+
+lazy_static::lazy_static! {
+    pub static ref DOWNLOAD_STATE: RwLock<DownloadState> = RwLock::new(DownloadState::Idle);
+    pub static ref DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+}
+
+impl DownloadState {
+    pub fn is_downloading(&self) -> bool {
+        matches!(self, DownloadState::Downloading { .. })
+    }
+
+    pub fn progress_percent(&self) -> Option<u8> {
+        if let DownloadState::Downloading { file_index, total_files, .. } = self {
+            Some(((*file_index as f32 / *total_files as f32) * 100.0) as u8)
+        } else {
+            None
+        }
+    }
+
+    pub fn status_string(&self) -> String {
+        match self {
+            DownloadState::Idle => "Idle".to_string(),
+            DownloadState::Downloading { current_file, file_index, total_files, .. } => {
+                format!("Downloading {} ({}/{})", current_file, file_index + 1, total_files)
+            }
+            DownloadState::Completed { model_name } => {
+                format!("Downloaded {}", model_name)
+            }
+            DownloadState::Failed { error, .. } => {
+                format!("Failed: {}", error)
+            }
+        }
+    }
+}

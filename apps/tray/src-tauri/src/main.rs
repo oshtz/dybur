@@ -7,6 +7,7 @@
 mod audio;
 mod config;
 mod doctor;
+mod ftue;
 mod hotkey;
 mod injection;
 mod logging;
@@ -29,7 +30,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use audio::{AudioCapture, get_audio_error_help, list_input_devices};
 use config::{get_config_path, save_config};
 use injection::inject_text;
-use models::{list_models, is_default_model_installed, format_bytes, DEFAULT_MODEL};
+use models::{list_models, is_default_model_installed, format_bytes, DEFAULT_MODEL, is_download_in_progress, get_download_status};
 use state::{AppState, RecordingState};
 use stt::{SttEngine, get_model_paths};
 
@@ -60,6 +61,16 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::new(AppState::new()))
+        .invoke_handler(tauri::generate_handler![
+            ftue::ftue_get_config,
+            ftue::ftue_get_platform,
+            ftue::ftue_run_system_check,
+            ftue::ftue_start_download,
+            ftue::ftue_complete,
+            ftue::ftue_skip,
+            ftue::ftue_check_model_installed,
+            ftue::ftue_close,
+        ])
         .setup(|app| {
             // Load configuration
             let state = app.state::<Mutex<AppState>>();
@@ -157,6 +168,18 @@ fn main() {
                 });
             }
 
+            // Show FTUE window if needed (first launch or model not installed)
+            if ftue::should_show_ftue() {
+                let app_handle = app.handle().clone();
+                // Delay slightly to let the tray icon appear first
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(e) = ftue::show_ftue_window(&app_handle) {
+                        log_error!("ftue", "Failed to show FTUE window: {}", e);
+                    }
+                });
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -188,13 +211,15 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     // Settings submenu
     let open_config = MenuItemBuilder::with_id("open_config", "Open Config File").build(app)?;
     let run_diagnostics = MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
+    let run_setup = MenuItemBuilder::with_id("run_setup", "Run Setup Wizard...").build(app)?;
     #[cfg(not(target_os = "windows"))]
     let install_cli = MenuItemBuilder::with_id("install_cli", "Install Command Line Tool...").build(app)?;
     let about = MenuItemBuilder::with_id("about", "About dybur").build(app)?;
 
     let mut settings_builder = SubmenuBuilder::with_id(app, "settings", "Settings")
         .item(&open_config)
-        .item(&run_diagnostics);
+        .item(&run_diagnostics)
+        .item(&run_setup);
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -228,6 +253,15 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
 fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "models", "Models");
 
+    // Check for download in progress first
+    if let Some(status) = get_download_status() {
+        let status_item = MenuItemBuilder::with_id("download_status", &status)
+            .enabled(false)
+            .build(app)?;
+        submenu = submenu.item(&status_item);
+        submenu = submenu.separator();
+    }
+
     // List installed models
     let installed_models = list_models();
 
@@ -250,7 +284,16 @@ fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<t
 
     submenu = submenu.separator();
 
-    let download_model = MenuItemBuilder::with_id("download_model", "Download Model...").build(app)?;
+    // Disable download button if download already in progress
+    let download_in_progress = is_download_in_progress();
+    let download_label = if download_in_progress {
+        "Downloading..."
+    } else {
+        "Download Model..."
+    };
+    let download_model = MenuItemBuilder::with_id("download_model", download_label)
+        .enabled(!download_in_progress)
+        .build(app)?;
     let clean_models = MenuItemBuilder::with_id("clean_models", "Clean Unused").build(app)?;
 
     submenu = submenu.item(&download_model).item(&clean_models);
@@ -334,6 +377,9 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         "about" => {
             show_about(app);
         }
+        "run_setup" => {
+            run_setup_wizard(app);
+        }
         #[cfg(not(target_os = "windows"))]
         "install_cli" => {
             install_cli_to_path(app);
@@ -415,6 +461,26 @@ fn run_diagnostics(app: &tauri::AppHandle) {
 
     // Open logs so user can see details
     open_logs(app);
+}
+
+/// Run the setup wizard (FTUE)
+fn run_setup_wizard(app: &tauri::AppHandle) {
+    log_info!("service", "Opening setup wizard...");
+
+    // Reset FTUE state to allow re-running
+    let mut state = ftue::load_ftue_state();
+    state.completed = false;
+    state.skipped = false;
+    state.current_step = 1;
+    let _ = ftue::save_ftue_state(&state);
+
+    // Show the FTUE window
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = ftue::show_ftue_window(&app_handle) {
+            log_error!("service", "Failed to show setup wizard: {}", e);
+        }
+    });
 }
 
 /// Show about dialog
@@ -759,12 +825,30 @@ fn spawn_model_download(app: &tauri::AppHandle) {
         return;
     }
 
+    if is_download_in_progress() {
+        log_info!("models", "Download already in progress");
+        return;
+    }
+
     log_info!("models", "Starting model download...");
     #[cfg(target_os = "windows")]
     show_windows_notification("Model Download", "Downloading model... This may take a few minutes.");
     #[cfg(target_os = "macos")]
     show_macos_notification("Model Download", "Downloading model... This may take a few minutes.");
 
+    // Rebuild menu immediately to show "Downloading..." status
+    rebuild_tray_menu(app);
+
+    // Start menu refresh thread (updates every 2 seconds during download)
+    let app_handle_refresh = app.clone();
+    std::thread::spawn(move || {
+        while is_download_in_progress() {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            rebuild_tray_menu(&app_handle_refresh);
+        }
+    });
+
+    // Start download thread
     let app_handle = app.clone();
     std::thread::spawn(move || {
         match models::download_model_sync(DEFAULT_MODEL, "int8") {
@@ -777,6 +861,29 @@ fn spawn_model_download(app: &tauri::AppHandle) {
 
                 // Rebuild menu to show the new model
                 rebuild_tray_menu(&app_handle);
+
+                // Also try to load the model so user doesn't need to restart
+                let state = app_handle.state::<Mutex<AppState>>();
+                let model_name = {
+                    let state_guard = state.inner().lock().unwrap();
+                    state_guard.config.model.clone()
+                };
+
+                if let Some(stt_config) = get_model_paths(&model_name) {
+                    let mut engine = STT_ENGINE.lock().unwrap();
+                    match engine.load(stt_config) {
+                        Ok(()) => {
+                            log_info!("model", "STT model '{}' loaded and ready", model_name);
+                            #[cfg(target_os = "windows")]
+                            show_windows_notification("Model Ready", "Speech model is now ready to use!");
+                            #[cfg(target_os = "macos")]
+                            show_macos_notification("Model Ready", "Speech model is now ready to use!");
+                        }
+                        Err(e) => {
+                            log_error!("model", "Failed to load STT model after download: {}", e);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 log_error!("models", "Model download failed: {}", e);
@@ -784,6 +891,9 @@ fn spawn_model_download(app: &tauri::AppHandle) {
                 show_windows_notification("Model Download Failed", &format!("Error: {}", e));
                 #[cfg(target_os = "macos")]
                 show_macos_notification("Model Download Failed", &format!("Error: {}", e));
+
+                // Rebuild menu to show error state
+                rebuild_tray_menu(&app_handle);
             }
         }
     });
@@ -926,6 +1036,22 @@ fn toggle_recording(app: &tauri::AppHandle) {
                 log_error!("model", "STT model not loaded. Run 'dybur models prefetch' first.");
                 state_guard.set_error("STT model not loaded. Run 'dybur models prefetch' first.".to_string());
                 update_tray_status(app, "Model not loaded");
+
+                // Show native alert to user - must be done in a separate thread to not block
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let title = "Speech Model Required";
+                    let message = "The speech recognition model is not installed.\n\n\
+                        Dictation requires the model to be downloaded first.\n\n\
+                        Right-click the dybur tray icon and select:\n\
+                        Models > Download Model";
+
+                    #[cfg(target_os = "windows")]
+                    show_windows_alert(title, message);
+
+                    #[cfg(target_os = "macos")]
+                    show_macos_alert(title, message);
+                });
                 return;
             }
         }
@@ -1179,12 +1305,34 @@ fn get_hotkey_error_help(error: &str) -> String {
     "Check the logs for more details. Try a different hotkey combination.".to_string()
 }
 
-/// Show Windows notification
+/// Show Windows notification (toast style)
 #[cfg(target_os = "windows")]
 fn show_windows_notification(title: &str, message: &str) {
     // Use Windows toast notification API
     // For now, just log - full implementation would use windows-rs
     log_info!("service", "Notification: {} - {}", title, message);
+}
+
+/// Show Windows alert dialog (blocking message box)
+#[cfg(target_os = "windows")]
+fn show_windows_alert(title: &str, message: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONWARNING};
+    use windows::core::PCWSTR;
+
+    let title_wide: Vec<u16> = OsStr::new(title).encode_wide().chain(std::iter::once(0)).collect();
+    let message_wide: Vec<u16> = OsStr::new(message).encode_wide().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(message_wide.as_ptr()),
+            PCWSTR(title_wide.as_ptr()),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+    log_info!("service", "Alert shown: {} - {}", title, message);
 }
 
 /// Show macOS notification
@@ -1193,6 +1341,27 @@ fn show_macos_notification(title: &str, message: &str) {
     // Use macOS notification center
     // For now, just log - full implementation would use objc/cocoa
     log_info!("service", "Notification: {} - {}", title, message);
+}
+
+/// Show macOS alert dialog (blocking dialog)
+#[cfg(target_os = "macos")]
+fn show_macos_alert(title: &str, message: &str) {
+    use std::process::Command;
+
+    // Escape quotes in title and message for AppleScript
+    let title_escaped = title.replace("\"", "\\\"").replace("'", "'\\''");
+    let message_escaped = message.replace("\"", "\\\"").replace("'", "'\\''");
+
+    let script = format!(
+        r#"display dialog "{}" with title "{}" buttons {{"OK"}} default button "OK" with icon caution"#,
+        message_escaped, title_escaped
+    );
+
+    let _ = Command::new("osascript")
+        .args(["-e", &script])
+        .output();
+
+    log_info!("service", "Alert shown: {} - {}", title, message);
 }
 
 /// Acquire single instance lock or exit if already running
