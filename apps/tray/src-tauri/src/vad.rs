@@ -3,13 +3,14 @@
 //! Filters silence and noise from audio before STT processing.
 //! Uses Silero VAD ONNX model for speech probability detection.
 
-use ndarray::{Array1, ArrayD, IxDyn};
+use ndarray::{arr0, Array1, ArrayD, IxDyn};
 use ort::{session::Session, value::TensorRef};
 use std::path::PathBuf;
 
 /// VAD processing constants
 const SAMPLE_RATE: i64 = 16000;
 const CHUNK_SIZE: usize = 512; // 32ms at 16kHz
+const CONTEXT_SIZE: usize = 64; // Context samples for V5 model
 
 /// VAD configuration
 #[derive(Debug, Clone)]
@@ -79,10 +80,10 @@ pub struct VadEngine {
     session: Option<Session>,
     state: VadState,
     config: VadConfig,
-    /// LSTM hidden state (h) - shape [2, 1, 64]
-    h_state: ArrayD<f32>,
-    /// LSTM cell state (c) - shape [2, 1, 64]
-    c_state: ArrayD<f32>,
+    /// LSTM state tensor - shape [2, 1, 128]
+    rnn_state: ArrayD<f32>,
+    /// Context buffer for V5 model - last 64 samples from previous chunk
+    context: Vec<f32>,
     last_error: Option<VadError>,
 }
 
@@ -93,8 +94,8 @@ impl VadEngine {
             session: None,
             state: VadState::Unloaded,
             config: VadConfig::default(),
-            h_state: ArrayD::zeros(IxDyn(&[2, 1, 64])),
-            c_state: ArrayD::zeros(IxDyn(&[2, 1, 64])),
+            rnn_state: ArrayD::zeros(IxDyn(&[2, 1, 128])),
+            context: vec![0.0; CONTEXT_SIZE],
             last_error: None,
         }
     }
@@ -143,6 +144,14 @@ impl VadEngine {
                 err
             })?;
 
+        // Log model inputs and outputs for debugging
+        for input in session.inputs() {
+            crate::log_debug!("vad", "Model input '{}' => {:?}", input.name(), input.dtype());
+        }
+        for output in session.outputs() {
+            crate::log_debug!("vad", "Model output '{}' => {:?}", output.name(), output.dtype());
+        }
+
         self.session = Some(session);
         self.state = VadState::Ready;
         self.reset_state();
@@ -158,10 +167,10 @@ impl VadEngine {
         self.reset_state();
     }
 
-    /// Reset LSTM states (call between recordings)
+    /// Reset LSTM state and context (call between recordings)
     pub fn reset_state(&mut self) {
-        self.h_state = ArrayD::zeros(IxDyn(&[2, 1, 64]));
-        self.c_state = ArrayD::zeros(IxDyn(&[2, 1, 64]));
+        self.rnn_state = ArrayD::zeros(IxDyn(&[2, 1, 128]));
+        self.context = vec![0.0; CONTEXT_SIZE];
     }
 
     /// Process a single audio chunk and return speech probability
@@ -178,36 +187,40 @@ impl VadEngine {
             )));
         }
 
-        // Prepare input tensor [batch=1, chunk_size=512]
-        let input_array = Array1::from_vec(chunk.to_vec())
-            .into_shape_with_order((1, CHUNK_SIZE))
+        // V5 model requires context prepended to input: [context (64)] + [chunk (512)] = 576 samples
+        let mut input_with_context = Vec::with_capacity(CONTEXT_SIZE + CHUNK_SIZE);
+        input_with_context.extend_from_slice(&self.context);
+        input_with_context.extend_from_slice(chunk);
+
+        // Prepare input tensor [batch=1, total_size=576]
+        let input_array = Array1::from_vec(input_with_context.clone())
+            .into_shape_with_order((1, CONTEXT_SIZE + CHUNK_SIZE))
             .map_err(|e| VadError::InferenceFailed(e.to_string()))?;
 
-        // Sample rate tensor [1]
-        let sr_array = Array1::from_vec(vec![SAMPLE_RATE]);
+        // Sample rate as scalar (0-dimensional tensor)
+        let sr_scalar = arr0(SAMPLE_RATE);
 
         // Create tensor refs from views
         let input_tensor = TensorRef::from_array_view(input_array.view())
             .map_err(|e| VadError::InferenceFailed(format!("Failed to create input tensor: {}", e)))?;
 
-        let sr_tensor = TensorRef::from_array_view(sr_array.view())
+        let sr_tensor = TensorRef::from_array_view(sr_scalar.view())
             .map_err(|e| VadError::InferenceFailed(format!("Failed to create sr tensor: {}", e)))?;
 
-        let h_tensor = TensorRef::from_array_view(self.h_state.view())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to create h tensor: {}", e)))?;
-
-        let c_tensor = TensorRef::from_array_view(self.c_state.view())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to create c tensor: {}", e)))?;
+        let state_tensor = TensorRef::from_array_view(self.rnn_state.view())
+            .map_err(|e| VadError::InferenceFailed(format!("Failed to create state tensor: {}", e)))?;
 
         // Run inference
         let outputs = session
             .run(ort::inputs![
                 "input" => input_tensor,
                 "sr" => sr_tensor,
-                "h" => h_tensor,
-                "c" => c_tensor,
+                "state" => state_tensor,
             ])
             .map_err(|e| VadError::InferenceFailed(format!("Inference failed: {}", e)))?;
+
+        // Update context with last 64 samples for next iteration
+        self.context = input_with_context[CHUNK_SIZE..].to_vec();
 
         // Extract output probability
         let output = outputs.get("output")
@@ -219,26 +232,17 @@ impl VadEngine {
 
         let prob = output_data[0];
 
-        // Extract and update LSTM states
-        let hn = outputs.get("hn")
-            .ok_or_else(|| VadError::InferenceFailed("Missing 'hn' in model outputs".to_string()))?;
-        let cn = outputs.get("cn")
-            .ok_or_else(|| VadError::InferenceFailed("Missing 'cn' in model outputs".to_string()))?;
+        // Extract and update LSTM state
+        let state_n = outputs.get("stateN")
+            .ok_or_else(|| VadError::InferenceFailed("Missing 'stateN' in model outputs".to_string()))?;
 
-        let (hn_shape, hn_data) = hn
+        let (state_shape, state_data) = state_n
             .try_extract_tensor::<f32>()
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to extract hn: {}", e)))?;
+            .map_err(|e| VadError::InferenceFailed(format!("Failed to extract stateN: {}", e)))?;
 
-        let (cn_shape, cn_data) = cn
-            .try_extract_tensor::<f32>()
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to extract cn: {}", e)))?;
-
-        // Update states
-        self.h_state = ArrayD::from_shape_vec(hn_shape.to_ixdyn(), hn_data.to_vec())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to reshape hn: {}", e)))?;
-
-        self.c_state = ArrayD::from_shape_vec(cn_shape.to_ixdyn(), cn_data.to_vec())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to reshape cn: {}", e)))?;
+        // Update state
+        self.rnn_state = ArrayD::from_shape_vec(state_shape.to_ixdyn(), state_data.to_vec())
+            .map_err(|e| VadError::InferenceFailed(format!("Failed to reshape stateN: {}", e)))?;
 
         Ok(prob)
     }
@@ -267,12 +271,23 @@ impl VadEngine {
         // Process audio in chunks
         let num_chunks = audio.len() / CHUNK_SIZE;
 
+        // Debug: log audio characteristics
+        let audio_min = audio.iter().cloned().fold(f32::INFINITY, f32::min);
+        let audio_max = audio.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let audio_rms: f32 = (audio.iter().map(|x| x * x).sum::<f32>() / audio.len() as f32).sqrt();
+        crate::log_debug!("vad", "Audio stats: {} samples, min={:.4}, max={:.4}, rms={:.4}", audio.len(), audio_min, audio_max, audio_rms);
+
         for i in 0..num_chunks {
             let start = i * CHUNK_SIZE;
             let chunk = &audio[start..start + CHUNK_SIZE];
 
             let prob = self.process_chunk(chunk)?;
             let is_speech = prob >= threshold;
+
+            // Log first 10 chunks for debugging
+            if i < 10 {
+                crate::log_debug!("vad", "Chunk {}: prob={:.4}, threshold={:.2}, is_speech={}", i, prob, threshold, is_speech);
+            }
 
             if is_speech {
                 if !in_speech {
