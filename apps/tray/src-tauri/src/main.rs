@@ -543,15 +543,70 @@ fn show_about(_app: &tauri::AppHandle) {
     show_macos_notification("About dybur", &message);
 }
 
-/// Check if Node.js is installed
+/// Check if Node.js is installed and return the path to node binary
+#[cfg(target_os = "macos")]
+fn find_node_path() -> Option<String> {
+    use std::process::Command;
+    use std::path::Path;
+
+    // Common Node.js installation paths on macOS
+    let common_paths = [
+        "/opt/homebrew/bin/node",       // Homebrew on Apple Silicon
+        "/usr/local/bin/node",          // Homebrew on Intel Macs
+        "/usr/bin/node",                // System installation
+    ];
+
+    // Check common paths first
+    for path in &common_paths {
+        if Path::new(path).exists() {
+            if let Ok(output) = Command::new(path).arg("--version").output() {
+                if output.status.success() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+
+    // Check nvm installation (most common version manager)
+    if let Some(home) = dirs::home_dir() {
+        let nvm_dir = home.join(".nvm/versions/node");
+        if nvm_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+                // Get the most recent version (sorted descending)
+                let mut versions: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .collect();
+                versions.sort();
+                versions.reverse();
+
+                for version_dir in versions {
+                    let node_path = version_dir.join("bin/node");
+                    if node_path.exists() {
+                        if let Ok(output) = Command::new(&node_path).arg("--version").output() {
+                            if output.status.success() {
+                                return Some(node_path.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: try PATH (works if launched from terminal)
+    if let Ok(output) = Command::new("node").arg("--version").output() {
+        if output.status.success() {
+            return Some("node".to_string());
+        }
+    }
+
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn check_node_installed() -> bool {
-    use std::process::Command;
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    find_node_path().is_some()
 }
 
 /// Check if CLI is installed and prompt to install on first launch (macOS only)
@@ -560,11 +615,16 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
     use std::process::Command;
     use std::path::Path;
 
-    // Check if Node.js is installed
-    if !check_node_installed() {
-        log_info!("service", "Node.js not found, skipping CLI installation. Users can install Node.js to enable CLI.");
-        return;
-    }
+    // Check if Node.js is installed and get the path
+    let node_path = match find_node_path() {
+        Some(p) => p,
+        None => {
+            log_info!("service", "Node.js not found, skipping CLI installation. Users can install Node.js to enable CLI.");
+            return;
+        }
+    };
+
+    log_info!("service", "Found Node.js at: {}", node_path);
 
     let cli_path = Path::new("/usr/local/bin/dybur");
 
@@ -637,9 +697,10 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
         return;
     }
 
-    // Create wrapper shell script
+    // Create wrapper shell script with absolute node path
     let wrapper_content = format!(
-        "#!/bin/bash\nexec node \"{}\" \"$@\"\n",
+        "#!/bin/bash\nexec \"{}\" \"{}\" \"$@\"\n",
+        node_path,
         cli_js_path.display()
     );
     if let Err(e) = std::fs::write(&wrapper_path, &wrapper_content) {
