@@ -20,10 +20,31 @@ pub struct DyburConfig {
     /// Recording mode: "toggle" (press to start/stop) or "push_to_talk" (hold to record)
     #[serde(default = "default_recording_mode")]
     pub recording_mode: String,
+    /// Enable Voice Activity Detection to filter silence before transcription
+    #[serde(default = "default_vad_enabled")]
+    pub vad_enabled: bool,
+    /// VAD speech probability threshold (0.0-1.0)
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,
+    /// Minimum speech duration in ms to keep
+    #[serde(default = "default_vad_min_speech_ms")]
+    pub vad_min_speech_ms: u32,
 }
 
 fn default_recording_mode() -> String {
     "toggle".to_string()
+}
+
+fn default_vad_enabled() -> bool {
+    true
+}
+
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+
+fn default_vad_min_speech_ms() -> u32 {
+    250
 }
 
 impl Default for DyburConfig {
@@ -37,6 +58,9 @@ impl Default for DyburConfig {
             clipboard_cleanup: true,
             input_device: None,
             recording_mode: default_recording_mode(),
+            vad_enabled: default_vad_enabled(),
+            vad_threshold: default_vad_threshold(),
+            vad_min_speech_ms: default_vad_min_speech_ms(),
         }
     }
 }

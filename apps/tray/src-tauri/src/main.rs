@@ -16,6 +16,7 @@ mod privacy;
 mod single_instance;
 mod state;
 mod stt;
+mod vad;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,13 +36,24 @@ use state::{AppState, RecordingState};
 use stt::{SttEngine, get_model_paths};
 
 // Thread-local storage for AudioCapture (not Send+Sync due to cpal::Stream)
+// Note: Only used to keep the stream alive, not for data retrieval
 thread_local! {
     static AUDIO_CAPTURE: RefCell<Option<AudioCapture>> = const { RefCell::new(None) };
+}
+
+// Global audio buffer for cross-thread access (the buffer Arc IS Send+Sync)
+lazy_static::lazy_static! {
+    static ref RECORDING_BUFFER: Mutex<Option<std::sync::Arc<std::sync::Mutex<Vec<f32>>>>> = Mutex::new(None);
 }
 
 // Global STT engine (wrapped in Mutex for thread safety)
 lazy_static::lazy_static! {
     static ref STT_ENGINE: Mutex<SttEngine> = Mutex::new(SttEngine::new());
+}
+
+// Global VAD engine (wrapped in Mutex for thread safety)
+lazy_static::lazy_static! {
+    static ref VAD_ENGINE: Mutex<vad::VadEngine> = Mutex::new(vad::VadEngine::new());
 }
 
 // Flag to track explicit quit request (to bypass prevent_exit)
@@ -102,6 +114,36 @@ fn main() {
                     "STT model '{}' not found. Run 'dybur models prefetch' to download it.",
                     model_name
                 );
+            }
+
+            // Load VAD model if available
+            let vad_model_path = models::get_vad_model_path();
+            if vad_model_path.exists() {
+                let mut vad_engine = VAD_ENGINE.lock().unwrap();
+                match vad_engine.load(vad_model_path) {
+                    Ok(()) => {
+                        log_info!("vad", "VAD model loaded and ready");
+                    }
+                    Err(e) => {
+                        log_warn!("vad", "Failed to load VAD model: {} (VAD filtering disabled)", e);
+                    }
+                }
+            } else {
+                log_info!("vad", "VAD model not found, downloading...");
+                // Try to download VAD model
+                match models::download_vad_model_sync() {
+                    Ok(path) => {
+                        let mut vad_engine = VAD_ENGINE.lock().unwrap();
+                        if let Err(e) = vad_engine.load(path) {
+                            log_warn!("vad", "Failed to load downloaded VAD model: {}", e);
+                        } else {
+                            log_info!("vad", "VAD model downloaded and loaded");
+                        }
+                    }
+                    Err(e) => {
+                        log_warn!("vad", "Failed to download VAD model: {} (VAD filtering disabled)", e);
+                    }
+                }
             }
 
             // Create tray menu
@@ -211,6 +253,9 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     // Recording mode submenu
     let recording_mode_submenu = build_recording_mode_submenu(app)?;
 
+    // VAD toggle
+    let vad_toggle = build_vad_toggle(app)?;
+
     // Settings submenu
     let open_config = MenuItemBuilder::with_id("open_config", "Open Config File").build(app)?;
     let run_diagnostics = MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
@@ -245,6 +290,7 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .item(&models_submenu)
         .item(&devices_submenu)
         .item(&recording_mode_submenu)
+        .item(&vad_toggle)
         .separator()
         .item(&settings_submenu)
         .item(&logs)
@@ -394,6 +440,23 @@ fn build_recording_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::S
     submenu.build()
 }
 
+/// Build VAD toggle menu item
+fn build_vad_toggle(app: &tauri::AppHandle) -> Result<tauri::menu::MenuItem<tauri::Wry>, tauri::Error> {
+    let state = app.state::<Mutex<AppState>>();
+    let vad_enabled = {
+        let state_guard = state.inner().lock().unwrap();
+        state_guard.config.vad_enabled
+    };
+
+    let label = if vad_enabled {
+        "✓ Filter Silence (VAD)"
+    } else {
+        "  Filter Silence (VAD)"
+    };
+
+    MenuItemBuilder::with_id("vad_toggle", label).build(app)
+}
+
 /// Handle tray menu events
 fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     match event_id {
@@ -446,6 +509,9 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         }
         "mode_push_to_talk" => {
             select_recording_mode(app, "push_to_talk");
+        }
+        "vad_toggle" => {
+            toggle_vad(app);
         }
         _ => {}
     }
@@ -983,6 +1049,34 @@ fn select_recording_mode(app: &tauri::AppHandle, mode: &str) {
     rebuild_tray_menu(app);
 }
 
+/// Toggle VAD (Voice Activity Detection) enabled/disabled
+fn toggle_vad(app: &tauri::AppHandle) {
+    let state = app.state::<Mutex<AppState>>();
+    let new_state = {
+        let mut state_guard = state.inner().lock().unwrap();
+
+        // Toggle the state
+        state_guard.config.vad_enabled = !state_guard.config.vad_enabled;
+        let new_state = state_guard.config.vad_enabled;
+
+        // Save config
+        if let Err(e) = save_config(&state_guard.config) {
+            log_error!("config", "Failed to save config: {}", e);
+            // Restore previous value
+            state_guard.config.vad_enabled = !new_state;
+            return;
+        }
+
+        new_state
+    };
+
+    let status = if new_state { "enabled" } else { "disabled" };
+    log_info!("vad", "Voice Activity Detection {}", status);
+
+    // Rebuild the menu to reflect the new state
+    rebuild_tray_menu(app);
+}
+
 /// Unregister and re-register the hotkey with a new recording mode
 fn reregister_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::Shortcut;
@@ -1177,6 +1271,15 @@ fn start_recording(app: &tauri::AppHandle) {
                 update_tray_status(app, "Error: Recording failed");
                 return;
             }
+            // Store buffer Arc globally for cross-thread access
+            {
+                let buffer_arc = capture.get_buffer_arc();
+                let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
+                *global_buffer = Some(buffer_arc);
+                log_info!("audio", "Recording buffer stored globally");
+            }
+
+            // Store AudioCapture in thread-local to keep stream alive
             AUDIO_CAPTURE.with(|cap| {
                 *cap.borrow_mut() = Some(capture);
             });
@@ -1207,17 +1310,37 @@ fn stop_recording(app: &tauri::AppHandle) {
         return;
     }
 
-    // Stop recording and get audio data
-    let audio_data: Option<Vec<f32>> = AUDIO_CAPTURE.with(|capture| {
-        capture.borrow_mut().take().map(|mut cap| cap.stop())
+    // Retrieve audio data from global buffer (works across threads)
+    let audio_data: Option<Vec<f32>> = {
+        let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
+        if let Some(buffer_arc) = global_buffer.take() {
+            let mut buffer = buffer_arc.lock().unwrap();
+            let data = std::mem::take(&mut *buffer);
+            let duration = data.len() as f32 / 16000.0;
+            log_info!("audio", "Retrieved {:.2}s of audio from global buffer", duration);
+            Some(data)
+        } else {
+            log_warn!("audio", "No recording buffer found!");
+            None
+        }
+    };
+
+    // Try to stop the stream (may be on different thread, that's OK)
+    AUDIO_CAPTURE.with(|capture| {
+        if let Some(mut cap) = capture.borrow_mut().take() {
+            cap.stop_stream();
+        }
     });
 
     state_guard.set_recording(false);
     set_overlay_state(app, RecordingState::Idle);
     log_info!("audio", "Recording stopped");
 
-    // Get config for clipboard cleanup setting
+    // Get config for clipboard cleanup and VAD settings
     let restore_clipboard = state_guard.config.clipboard_cleanup;
+    let vad_enabled = state_guard.config.vad_enabled;
+    let vad_threshold = state_guard.config.vad_threshold;
+    let vad_min_speech_ms = state_guard.config.vad_min_speech_ms;
 
     // Release the state lock before processing
     drop(state_guard);
@@ -1231,6 +1354,43 @@ fn stop_recording(app: &tauri::AppHandle) {
             return;
         }
 
+        // Apply VAD filtering if enabled
+        let filtered_audio = if vad_enabled {
+            let mut vad_engine = VAD_ENGINE.lock().unwrap();
+            if vad_engine.is_ready() {
+                // Configure VAD with current settings
+                vad_engine.set_config(vad::VadConfig {
+                    threshold: vad_threshold,
+                    min_speech_duration_ms: vad_min_speech_ms,
+                    ..Default::default()
+                });
+
+                match vad_engine.filter_speech(&audio) {
+                    Ok(filtered) => {
+                        if filtered.is_empty() {
+                            log_info!("vad", "No speech detected by VAD");
+                            update_tray_status(app, "No speech detected");
+                            return;
+                        }
+                        if filtered.len() < 1600 {
+                            log_info!("vad", "Speech too short after VAD filtering ({} samples)", filtered.len());
+                            update_tray_status(app, "Too short");
+                            return;
+                        }
+                        filtered
+                    }
+                    Err(e) => {
+                        log_warn!("vad", "VAD filtering failed: {}, using original audio", e);
+                        audio
+                    }
+                }
+            } else {
+                audio
+            }
+        } else {
+            audio
+        };
+
         update_tray_status(app, "Transcribing...");
 
         // Run STT inference
@@ -1240,7 +1400,7 @@ fn stop_recording(app: &tauri::AppHandle) {
                 log_warn!("model", "STT model not loaded, cannot transcribe");
                 None
             } else {
-                match engine.transcribe(&audio) {
+                match engine.transcribe(&filtered_audio) {
                     Ok(result) => Some(result),
                     Err(e) => {
                         log_error!("model", "Transcription failed: {}", e);

@@ -57,6 +57,25 @@ export interface DyburConfig {
    * @default "toggle"
    */
   recordingMode: 'toggle' | 'push_to_talk';
+
+  /**
+   * Enable Voice Activity Detection to filter silence before transcription
+   * @default true
+   */
+  vadEnabled: boolean;
+
+  /**
+   * VAD speech probability threshold (0.0-1.0)
+   * Higher values = more strict (fewer false positives, may miss quiet speech)
+   * @default 0.5
+   */
+  vadThreshold: number;
+
+  /**
+   * Minimum speech duration in milliseconds to keep
+   * @default 250
+   */
+  vadMinSpeechMs: number;
 }
 
 /**
@@ -71,6 +90,9 @@ export const DEFAULT_CONFIG: DyburConfig = {
   clipboardCleanup: true,
   inputDevice: null,
   recordingMode: 'toggle',
+  vadEnabled: true,
+  vadThreshold: 0.5,
+  vadMinSpeechMs: 250,
 };
 
 /**
@@ -239,6 +261,49 @@ export function validateConfig(config: Partial<DyburConfig>): ValidationResult {
         field: 'recordingMode',
         message: 'recordingMode must be "toggle" or "push_to_talk"',
         value: config.recordingMode,
+      });
+    }
+  }
+
+  // Validate vadEnabled
+  if (config.vadEnabled !== undefined && typeof config.vadEnabled !== 'boolean') {
+    errors.push({
+      field: 'vadEnabled',
+      message: 'vadEnabled must be a boolean',
+      value: config.vadEnabled,
+    });
+  }
+
+  // Validate vadThreshold
+  if (config.vadThreshold !== undefined) {
+    if (typeof config.vadThreshold !== 'number') {
+      errors.push({
+        field: 'vadThreshold',
+        message: 'vadThreshold must be a number',
+        value: config.vadThreshold,
+      });
+    } else if (config.vadThreshold < 0 || config.vadThreshold > 1) {
+      errors.push({
+        field: 'vadThreshold',
+        message: 'vadThreshold must be between 0.0 and 1.0',
+        value: config.vadThreshold,
+      });
+    }
+  }
+
+  // Validate vadMinSpeechMs
+  if (config.vadMinSpeechMs !== undefined) {
+    if (typeof config.vadMinSpeechMs !== 'number') {
+      errors.push({
+        field: 'vadMinSpeechMs',
+        message: 'vadMinSpeechMs must be a number',
+        value: config.vadMinSpeechMs,
+      });
+    } else if (config.vadMinSpeechMs < 0 || config.vadMinSpeechMs > 5000) {
+      errors.push({
+        field: 'vadMinSpeechMs',
+        message: 'vadMinSpeechMs must be between 0 and 5000',
+        value: config.vadMinSpeechMs,
       });
     }
   }

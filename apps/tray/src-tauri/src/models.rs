@@ -16,6 +16,11 @@ pub const MODEL_REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
 /// Base URL for model downloads
 pub const MODEL_BASE_URL: &str = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main";
 
+/// VAD model constants
+pub const VAD_MODEL_NAME: &str = "silero-vad";
+pub const VAD_MODEL_URL: &str = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
+pub const VAD_MODEL_FILENAME: &str = "silero_vad.onnx";
+
 /// Model files for INT8 variant (smaller, ~670MB)
 pub const MODEL_FILES_INT8: &[&str] = &[
     "encoder-model.int8.onnx",
@@ -461,5 +466,56 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.0} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+// ============================================================================
+// VAD Model Management
+// ============================================================================
+
+/// Get the VAD model directory path
+pub fn get_vad_model_dir() -> PathBuf {
+    get_models_dir().join(VAD_MODEL_NAME)
+}
+
+/// Get the VAD model file path
+pub fn get_vad_model_path() -> PathBuf {
+    get_vad_model_dir().join(VAD_MODEL_FILENAME)
+}
+
+/// Check if VAD model is installed
+pub fn is_vad_model_installed() -> bool {
+    get_vad_model_path().exists()
+}
+
+/// Download VAD model synchronously
+pub fn download_vad_model_sync() -> Result<PathBuf, String> {
+    let vad_dir = get_vad_model_dir();
+    let vad_path = get_vad_model_path();
+
+    // Check if already installed
+    if vad_path.exists() {
+        crate::log_info!("models", "VAD model already installed");
+        return Ok(vad_path);
+    }
+
+    crate::log_info!("models", "Downloading VAD model...");
+
+    // Create directory
+    if let Err(e) = fs::create_dir_all(&vad_dir) {
+        return Err(format!("Failed to create VAD model directory: {}", e));
+    }
+
+    // Download the model file
+    match download_file_with_progress(VAD_MODEL_URL, &vad_path, None) {
+        Ok(size) => {
+            crate::log_info!("models", "VAD model downloaded ({} bytes)", size);
+            Ok(vad_path)
+        }
+        Err(e) => {
+            // Clean up on failure
+            let _ = fs::remove_dir_all(&vad_dir);
+            Err(format!("Failed to download VAD model: {}", e))
+        }
     }
 }

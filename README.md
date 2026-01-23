@@ -13,6 +13,7 @@ Fast, local, private voice dictation for macOS and Windows.
 - **Fast** - Sub-second transcription latency
 - **Multilingual** - Supports 25 European languages with automatic detection
 - **Smart** - Automatic punctuation and capitalization
+- **VAD** - Voice Activity Detection filters silence for better accuracy
 
 ## Installation
 
@@ -36,6 +37,19 @@ dybur supports two recording modes:
 
 You can switch modes from the tray menu (Recording Mode) or by editing the config file.
 
+### Voice Activity Detection (VAD)
+
+VAD automatically filters silence and background noise before transcription, improving accuracy and reducing processing time. It uses the lightweight [Silero VAD](https://github.com/snakers4/silero-vad) model (~2MB) running locally via ONNX.
+
+VAD is enabled by default. Toggle it from the tray menu or via CLI:
+
+```sh
+dybur vad          # Toggle VAD on/off
+dybur vad on       # Enable VAD
+dybur vad off      # Disable VAD
+dybur vad status   # Show VAD settings
+```
+
 All settings and controls are available from the tray menu or via CLI:
 
 ```sh
@@ -46,6 +60,7 @@ dybur settings    # Open config file (alias: config)
 dybur doctor      # Run diagnostics (alias: diag)
 dybur models      # Manage speech models (alias: m)
 dybur devices     # Manage input devices (alias: d)
+dybur vad         # Toggle Voice Activity Detection
 ```
 
 ## Configuration
@@ -63,7 +78,10 @@ Config file location:
   "silenceTimeoutMs": 1000,
   "model": "parakeet-tdt-0.6b-v3-onnx",
   "clipboardCleanup": true,
-  "recordingMode": "toggle"
+  "recordingMode": "toggle",
+  "vadEnabled": true,
+  "vadThreshold": 0.5,
+  "vadMinSpeechMs": 250
 }
 ```
 
@@ -76,6 +94,9 @@ Config file location:
 | `model` | Model name | Speech recognition model to use |
 | `clipboardCleanup` | `true`/`false` | Restore clipboard after text injection |
 | `recordingMode` | `"toggle"`/`"push_to_talk"` | Recording behavior mode |
+| `vadEnabled` | `true`/`false` | Enable Voice Activity Detection |
+| `vadThreshold` | `0.0`-`1.0` | VAD sensitivity (higher = stricter) |
+| `vadMinSpeechMs` | Number | Minimum speech duration to keep (ms) |
 
 ## Requirements
 
