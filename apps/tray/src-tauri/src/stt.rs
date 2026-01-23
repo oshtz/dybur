@@ -3,6 +3,7 @@
 //! Implements speech recognition using the Parakeet TDT model.
 //! Pipeline: Audio -> Mel Spectrogram -> Encoder -> Decoder -> Text
 
+use crate::execution_providers::{build_session, GpuPreference, SessionConfig};
 use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
 use ort::{
     session::{Session, SessionOutputs},
@@ -113,6 +114,10 @@ pub struct SttEngine {
     decoder_session: Option<Session>,
     mel_filterbank: Option<Array2<f32>>,
     last_error: Option<SttError>,
+    /// Whether GPU acceleration is active
+    gpu_enabled: bool,
+    /// Name of the execution provider being used
+    execution_provider: String,
 }
 
 impl SttEngine {
@@ -127,6 +132,8 @@ impl SttEngine {
             decoder_session: None,
             mel_filterbank: None,
             last_error: None,
+            gpu_enabled: false,
+            execution_provider: "None".to_string(),
         }
     }
 
@@ -145,8 +152,18 @@ impl SttEngine {
         self.last_error.as_ref()
     }
 
+    /// Check if GPU acceleration is enabled
+    pub fn is_gpu_enabled(&self) -> bool {
+        self.gpu_enabled
+    }
+
+    /// Get the name of the execution provider being used
+    pub fn execution_provider(&self) -> &str {
+        &self.execution_provider
+    }
+
     /// Load model from config
-    pub fn load(&mut self, config: SttConfig) -> Result<(), SttError> {
+    pub fn load(&mut self, config: SttConfig, gpu_preference: GpuPreference) -> Result<(), SttError> {
         self.state = SttState::Loading;
         self.last_error = None;
 
@@ -207,18 +224,21 @@ impl SttEngine {
         // The preprocessor is named nemo128.onnx in the istupakov/parakeet-tdt-0.6b-v3-onnx repo
         let preprocessor_path = config.encoder_path.parent()
             .map(|p| p.join("nemo128.onnx"));
-        
+
+        let session_config = SessionConfig::for_stt().with_gpu_preference(gpu_preference);
+
         let preprocessor_session = if let Some(ref prep_path) = preprocessor_path {
             if prep_path.exists() {
                 crate::log_info!("model", "Loading ONNX preprocessor...");
-                match (|| -> ort::Result<Session> {
-                    Session::builder()?
-                        .with_intra_threads(4)?
-                        .commit_from_file(prep_path)
-                })() {
-                    Ok(s) => {
-                        crate::log_info!("model", "ONNX preprocessor loaded");
-                        Some(s)
+                match build_session(prep_path, &session_config) {
+                    Ok((session, ep_result)) => {
+                        crate::log_info!(
+                            "model",
+                            "ONNX preprocessor loaded (provider: {}, GPU: {})",
+                            ep_result.provider_name,
+                            ep_result.is_gpu
+                        );
+                        Some(session)
                     }
                     Err(e) => {
                         crate::log_warn!("model", "Failed to load ONNX preprocessor, using manual computation: {}", e);
@@ -233,14 +253,10 @@ impl SttEngine {
             None
         };
 
-        // Initialize ONNX Runtime sessions
+        // Initialize ONNX Runtime sessions with GPU acceleration
         crate::log_info!("model", "Loading encoder model...");
-        let encoder_session = match (|| -> ort::Result<Session> {
-            Session::builder()?
-                .with_intra_threads(4)?
-                .commit_from_file(&config.encoder_path)
-        })() {
-            Ok(s) => s,
+        let (encoder_session, encoder_ep) = match build_session(&config.encoder_path, &session_config) {
+            Ok(result) => result,
             Err(e) => {
                 let err = SttError::ModelLoadFailed(format!("Failed to load encoder: {}", e));
                 self.state = SttState::Error;
@@ -249,14 +265,16 @@ impl SttEngine {
                 return Err(err);
             }
         };
+        crate::log_info!(
+            "model",
+            "Encoder loaded (provider: {}, GPU: {})",
+            encoder_ep.provider_name,
+            encoder_ep.is_gpu
+        );
 
         crate::log_info!("model", "Loading decoder model...");
-        let decoder_session = match (|| -> ort::Result<Session> {
-            Session::builder()?
-                .with_intra_threads(4)?
-                .commit_from_file(&config.decoder_path)
-        })() {
-            Ok(s) => s,
+        let (decoder_session, decoder_ep) = match build_session(&config.decoder_path, &session_config) {
+            Ok(result) => result,
             Err(e) => {
                 let err = SttError::ModelLoadFailed(format!("Failed to load decoder: {}", e));
                 self.state = SttState::Error;
@@ -265,6 +283,12 @@ impl SttEngine {
                 return Err(err);
             }
         };
+        crate::log_info!(
+            "model",
+            "Decoder loaded (provider: {}, GPU: {})",
+            decoder_ep.provider_name,
+            decoder_ep.is_gpu
+        );
 
         // Pre-compute mel filterbank (fallback if no ONNX preprocessor)
         let mel_filterbank = create_mel_filterbank(N_FFT, N_MELS, SAMPLE_RATE, MEL_FMIN, MEL_FMAX);
@@ -279,8 +303,15 @@ impl SttEngine {
         self.mel_filterbank = Some(mel_filterbank);
         self.config = Some(config);
         self.state = SttState::Ready;
+        self.gpu_enabled = encoder_ep.is_gpu;
+        self.execution_provider = encoder_ep.provider_name;
 
-        crate::log_info!("model", "STT model loaded successfully");
+        crate::log_info!(
+            "model",
+            "STT model loaded successfully (GPU: {}, provider: {})",
+            self.gpu_enabled,
+            self.execution_provider
+        );
 
         Ok(())
     }
@@ -295,6 +326,8 @@ impl SttEngine {
         self.mel_filterbank = None;
         self.state = SttState::Unloaded;
         self.last_error = None;
+        self.gpu_enabled = false;
+        self.execution_provider = "None".to_string();
 
         crate::log_info!("model", "STT model unloaded");
     }

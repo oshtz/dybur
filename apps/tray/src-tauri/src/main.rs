@@ -7,6 +7,7 @@
 mod audio;
 mod config;
 mod doctor;
+mod execution_providers;
 mod ftue;
 mod hotkey;
 mod injection;
@@ -97,10 +98,16 @@ fn main() {
                 model_name = state_guard.config.model.clone();
             }
 
+            // Get GPU preference from config
+            let gpu_preference = {
+                let state_guard = state.inner().lock().unwrap();
+                execution_providers::parse_gpu_preference(&state_guard.config.gpu_mode)
+            };
+
             // Load STT model
             if let Some(stt_config) = get_model_paths(&model_name) {
                 let mut engine = STT_ENGINE.lock().unwrap();
-                match engine.load(stt_config) {
+                match engine.load(stt_config, gpu_preference) {
                     Ok(()) => {
                         log_info!("model", "STT model '{}' loaded and ready", model_name);
                     }
@@ -120,7 +127,7 @@ fn main() {
             let vad_model_path = models::get_vad_model_path();
             if vad_model_path.exists() {
                 let mut vad_engine = VAD_ENGINE.lock().unwrap();
-                match vad_engine.load(vad_model_path) {
+                match vad_engine.load(vad_model_path, gpu_preference) {
                     Ok(()) => {
                         log_info!("vad", "VAD model loaded and ready");
                     }
@@ -134,7 +141,7 @@ fn main() {
                 match models::download_vad_model_sync() {
                     Ok(path) => {
                         let mut vad_engine = VAD_ENGINE.lock().unwrap();
-                        if let Err(e) = vad_engine.load(path) {
+                        if let Err(e) = vad_engine.load(path, gpu_preference) {
                             log_warn!("vad", "Failed to load downloaded VAD model: {}", e);
                         } else {
                             log_info!("vad", "VAD model downloaded and loaded");
@@ -256,6 +263,9 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     // VAD toggle
     let vad_toggle = build_vad_toggle(app)?;
 
+    // GPU mode submenu
+    let gpu_mode_submenu = build_gpu_mode_submenu(app)?;
+
     // Settings submenu
     let open_config = MenuItemBuilder::with_id("open_config", "Open Config File").build(app)?;
     let run_diagnostics = MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
@@ -291,6 +301,7 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .item(&devices_submenu)
         .item(&recording_mode_submenu)
         .item(&vad_toggle)
+        .item(&gpu_mode_submenu)
         .separator()
         .item(&settings_submenu)
         .item(&logs)
@@ -457,6 +468,40 @@ fn build_vad_toggle(app: &tauri::AppHandle) -> Result<tauri::menu::MenuItem<taur
     MenuItemBuilder::with_id("vad_toggle", label).build(app)
 }
 
+/// Build GPU mode submenu
+fn build_gpu_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+    let mut submenu = SubmenuBuilder::with_id(app, "gpu_mode", "GPU Acceleration");
+
+    let state = app.state::<Mutex<AppState>>();
+    let current_mode = {
+        let state_guard = state.inner().lock().unwrap();
+        state_guard.config.gpu_mode.clone()
+    };
+
+    let is_auto = current_mode != "cpu";
+    let is_cpu = current_mode == "cpu";
+
+    // Auto mode option
+    let auto_label = if is_auto {
+        "● Auto (use GPU if available)"
+    } else {
+        "  Auto (use GPU if available)"
+    };
+    let auto_item = MenuItemBuilder::with_id("gpu_auto", auto_label).build(app)?;
+    submenu = submenu.item(&auto_item);
+
+    // CPU-only mode option
+    let cpu_label = if is_cpu {
+        "● CPU Only (disable GPU)"
+    } else {
+        "  CPU Only (disable GPU)"
+    };
+    let cpu_item = MenuItemBuilder::with_id("gpu_cpu", cpu_label).build(app)?;
+    submenu = submenu.item(&cpu_item);
+
+    submenu.build()
+}
+
 /// Handle tray menu events
 fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     match event_id {
@@ -512,6 +557,12 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         }
         "vad_toggle" => {
             toggle_vad(app);
+        }
+        "gpu_auto" => {
+            select_gpu_mode(app, "auto");
+        }
+        "gpu_cpu" => {
+            select_gpu_mode(app, "cpu");
         }
         _ => {}
     }
@@ -1077,6 +1128,43 @@ fn toggle_vad(app: &tauri::AppHandle) {
     rebuild_tray_menu(app);
 }
 
+/// Select GPU acceleration mode
+fn select_gpu_mode(app: &tauri::AppHandle, mode: &str) {
+    let state = app.state::<Mutex<AppState>>();
+    {
+        let mut state_guard = state.inner().lock().unwrap();
+
+        let prev_mode = state_guard.config.gpu_mode.clone();
+
+        // No change needed
+        if prev_mode == mode {
+            return;
+        }
+
+        state_guard.config.gpu_mode = mode.to_string();
+
+        // Save config
+        if let Err(e) = save_config(&state_guard.config) {
+            log_error!("config", "Failed to save config: {}", e);
+            // Restore previous value
+            state_guard.config.gpu_mode = prev_mode;
+            return;
+        }
+    }
+
+    let mode_display = if mode == "cpu" { "CPU only" } else { "Auto (GPU if available)" };
+    log_info!("config", "GPU mode changed to: {}", mode_display);
+
+    // Show notification that restart is needed
+    #[cfg(target_os = "windows")]
+    show_windows_notification("GPU Mode Changed", &format!("GPU mode set to: {}. Restart app to apply.", mode_display));
+    #[cfg(target_os = "macos")]
+    show_macos_notification("GPU Mode Changed", &format!("GPU mode set to: {}. Restart app to apply.", mode_display));
+
+    // Rebuild the menu to reflect the new state
+    rebuild_tray_menu(app);
+}
+
 /// Unregister and re-register the hotkey with a new recording mode
 fn reregister_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::Shortcut;
@@ -1146,14 +1234,17 @@ fn spawn_model_download(app: &tauri::AppHandle) {
 
                 // Also try to load the model so user doesn't need to restart
                 let state = app_handle.state::<Mutex<AppState>>();
-                let model_name = {
+                let (model_name, gpu_preference) = {
                     let state_guard = state.inner().lock().unwrap();
-                    state_guard.config.model.clone()
+                    (
+                        state_guard.config.model.clone(),
+                        execution_providers::parse_gpu_preference(&state_guard.config.gpu_mode),
+                    )
                 };
 
                 if let Some(stt_config) = get_model_paths(&model_name) {
                     let mut engine = STT_ENGINE.lock().unwrap();
-                    match engine.load(stt_config) {
+                    match engine.load(stt_config, gpu_preference) {
                         Ok(()) => {
                             log_info!("model", "STT model '{}' loaded and ready", model_name);
                             #[cfg(target_os = "windows")]

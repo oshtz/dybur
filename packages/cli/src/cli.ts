@@ -11,6 +11,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { modelsCommand } from './commands/models.js';
 import { devicesCommand } from './commands/devices.js';
 import { vadCommand } from './commands/vad.js';
+import { gpuCommand } from './commands/gpu.js';
 import { banner, brand, header, command, info, error, dim, cyan, boxMessage } from './ui.js';
 
 const VERSION = '1.0.0';
@@ -31,6 +32,7 @@ function showHelp(): void {
   command('models, m', 'Manage speech models');
   command('devices, d', 'Manage input devices');
   command('vad', 'Toggle Voice Activity Detection');
+  command('gpu', 'Toggle GPU acceleration');
   console.log('');
 
   header('Model Commands');
@@ -136,6 +138,10 @@ async function main() {
 
       case 'vad':
         await vadCommand(commandArgs);
+        break;
+
+      case 'gpu':
+        await gpuCommand(commandArgs);
         break;
 
       default:

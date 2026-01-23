@@ -391,8 +391,13 @@ pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
 
                 // Load the model so user can dictate immediately without restart
                 if let Some(stt_config) = crate::stt::get_model_paths(DEFAULT_MODEL) {
+                    // Get GPU preference from config
+                    let gpu_preference = load_config()
+                        .map(|c| crate::execution_providers::parse_gpu_preference(&c.gpu_mode))
+                        .unwrap_or(crate::execution_providers::GpuPreference::Auto);
+
                     let mut engine = crate::STT_ENGINE.lock().unwrap();
-                    match engine.load(stt_config) {
+                    match engine.load(stt_config, gpu_preference) {
                         Ok(()) => {
                             crate::log_info!("ftue", "STT model loaded and ready");
                         }

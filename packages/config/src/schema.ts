@@ -76,6 +76,14 @@ export interface DyburConfig {
    * @default 250
    */
   vadMinSpeechMs: number;
+
+  /**
+   * GPU acceleration mode for ONNX inference
+   * "auto" = detect and use GPU if available (DirectML on Windows, CoreML on macOS)
+   * "cpu" = force CPU-only mode (disable GPU acceleration)
+   * @default "auto"
+   */
+  gpuMode: 'auto' | 'cpu';
 }
 
 /**
@@ -93,6 +101,7 @@ export const DEFAULT_CONFIG: DyburConfig = {
   vadEnabled: true,
   vadThreshold: 0.5,
   vadMinSpeechMs: 250,
+  gpuMode: 'auto',
 };
 
 /**
@@ -304,6 +313,17 @@ export function validateConfig(config: Partial<DyburConfig>): ValidationResult {
         field: 'vadMinSpeechMs',
         message: 'vadMinSpeechMs must be between 0 and 5000',
         value: config.vadMinSpeechMs,
+      });
+    }
+  }
+
+  // Validate gpuMode
+  if (config.gpuMode !== undefined) {
+    if (config.gpuMode !== 'auto' && config.gpuMode !== 'cpu') {
+      errors.push({
+        field: 'gpuMode',
+        message: 'gpuMode must be "auto" or "cpu"',
+        value: config.gpuMode,
       });
     }
   }

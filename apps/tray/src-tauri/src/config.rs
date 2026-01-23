@@ -29,10 +29,17 @@ pub struct DyburConfig {
     /// Minimum speech duration in ms to keep
     #[serde(default = "default_vad_min_speech_ms")]
     pub vad_min_speech_ms: u32,
+    /// GPU acceleration mode: "auto" (detect and use GPU if available) or "cpu" (CPU only)
+    #[serde(default = "default_gpu_mode")]
+    pub gpu_mode: String,
 }
 
 fn default_recording_mode() -> String {
     "toggle".to_string()
+}
+
+fn default_gpu_mode() -> String {
+    "auto".to_string()
 }
 
 fn default_vad_enabled() -> bool {
@@ -61,6 +68,7 @@ impl Default for DyburConfig {
             vad_enabled: default_vad_enabled(),
             vad_threshold: default_vad_threshold(),
             vad_min_speech_ms: default_vad_min_speech_ms(),
+            gpu_mode: default_gpu_mode(),
         }
     }
 }

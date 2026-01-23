@@ -3,6 +3,7 @@
 //! Filters silence and noise from audio before STT processing.
 //! Uses Silero VAD ONNX model for speech probability detection.
 
+use crate::execution_providers::{build_session, GpuPreference, SessionConfig};
 use ndarray::{arr0, Array1, ArrayD, IxDyn};
 use ort::{session::Session, value::TensorRef};
 use std::path::PathBuf;
@@ -85,6 +86,10 @@ pub struct VadEngine {
     /// Context buffer for V5 model - last 64 samples from previous chunk
     context: Vec<f32>,
     last_error: Option<VadError>,
+    /// Whether GPU acceleration is active
+    gpu_enabled: bool,
+    /// Name of the execution provider being used
+    execution_provider: String,
 }
 
 impl VadEngine {
@@ -97,6 +102,8 @@ impl VadEngine {
             rnn_state: ArrayD::zeros(IxDyn(&[2, 1, 128])),
             context: vec![0.0; CONTEXT_SIZE],
             last_error: None,
+            gpu_enabled: false,
+            execution_provider: "None".to_string(),
         }
     }
 
@@ -121,7 +128,7 @@ impl VadEngine {
     }
 
     /// Load VAD model from path
-    pub fn load(&mut self, model_path: PathBuf) -> Result<(), VadError> {
+    pub fn load(&mut self, model_path: PathBuf, gpu_preference: GpuPreference) -> Result<(), VadError> {
         self.last_error = None;
 
         if !model_path.exists() {
@@ -133,10 +140,9 @@ impl VadEngine {
 
         crate::log_info!("vad", "Loading VAD model from {:?}", model_path);
 
-        // Load ONNX session
-        let session = Session::builder()
-            .and_then(|builder| builder.with_intra_threads(1))
-            .and_then(|builder| builder.commit_from_file(&model_path))
+        // Load ONNX session with GPU support
+        let session_config = SessionConfig::for_vad().with_gpu_preference(gpu_preference);
+        let (session, ep_result) = build_session(&model_path, &session_config)
             .map_err(|e| {
                 let err = VadError::ModelLoadFailed(e.to_string());
                 self.state = VadState::Error;
@@ -154,9 +160,16 @@ impl VadEngine {
 
         self.session = Some(session);
         self.state = VadState::Ready;
+        self.gpu_enabled = ep_result.is_gpu;
+        self.execution_provider = ep_result.provider_name;
         self.reset_state();
 
-        crate::log_info!("vad", "VAD model loaded successfully");
+        crate::log_info!(
+            "vad",
+            "VAD model loaded successfully (GPU: {}, provider: {})",
+            self.gpu_enabled,
+            self.execution_provider
+        );
         Ok(())
     }
 
@@ -164,6 +177,8 @@ impl VadEngine {
     pub fn unload(&mut self) {
         self.session = None;
         self.state = VadState::Unloaded;
+        self.gpu_enabled = false;
+        self.execution_provider = "None".to_string();
         self.reset_state();
     }
 
