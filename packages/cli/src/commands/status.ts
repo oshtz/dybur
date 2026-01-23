@@ -83,6 +83,7 @@ export async function statusCommand(_args: string[]): Promise<void> {
     `  ${dim('Sentence case:')} ${config.sentenceCase ? green('enabled') : dim('disabled')}`
   );
   console.log(`  ${dim('Silence timeout:')} ${config.silenceTimeoutMs}ms`);
+  console.log(`  ${dim('Recording mode:')} ${config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle'}`);
 
   console.log('');
   divider();

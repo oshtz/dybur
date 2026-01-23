@@ -43,29 +43,20 @@ jobs:
         with:
           workspaces: |
             apps/tray/src-tauri -> target
-            apps/cli -> target
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build sidecar (CLI binary)
-        shell: pwsh
-        run: |
-          $target = rustc -vV | Select-String "host:" | ForEach-Object { $_.Line.Split(":")[1].Trim() }
-          Write-Host "Building sidecar for target: $target"
-
-          Push-Location apps/cli
-          cargo build --release
-          Pop-Location
-
-          $binaryDir = "apps/tray/src-tauri/binaries"
-          New-Item -ItemType Directory -Force -Path $binaryDir | Out-Null
-
-          Copy-Item "apps/cli/target/release/dybur.exe" "$binaryDir/dybur-$target.exe"
-          Write-Host "Sidecar built and copied to $binaryDir/dybur-$target.exe"
-
       - name: Build TypeScript packages
         run: pnpm build
+
+      - name: Copy CLI to resources
+        shell: pwsh
+        run: |
+          $resourcesDir = "apps/tray/src-tauri/resources"
+          New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
+          Copy-Item "packages/cli/dist/cli.js" "$resourcesDir/cli.js"
+          Write-Host "CLI copied to $resourcesDir/cli.js"
 
       - name: Build Tauri app (no bundles)
         working-directory: apps/tray
@@ -375,13 +366,13 @@ jobs:
             }
           }
 
-          # Include the CLI sidecar in the portable bundle
-          $sidecarPath = "apps/tray/src-tauri/binaries/dybur-x86_64-pc-windows-msvc.exe"
-          if (Test-Path $sidecarPath) {
-            Copy-Item -Path $sidecarPath -Destination $evbStaging -Force
-            Write-Host "Included sidecar: $sidecarPath"
+          # Include the CLI JS in the portable bundle (requires Node.js at runtime)
+          $cliPath = "apps/tray/src-tauri/resources/cli.js"
+          if (Test-Path $cliPath) {
+            Copy-Item -Path $cliPath -Destination $evbStaging -Force
+            Write-Host "Included CLI: $cliPath"
           } else {
-            Write-Host "Warning: Sidecar not found at $sidecarPath"
+            Write-Host "Warning: CLI not found at $cliPath"
           }
 
           # Show what's in the staging directory
@@ -545,7 +536,6 @@ jobs:
         with:
           workspaces: |
             apps/tray/src-tauri -> target
-            apps/cli -> target
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -553,15 +543,14 @@ jobs:
       - name: Install macOS build dependencies
         run: brew install create-dmg
 
-      - name: Build sidecar for Apple Silicon
-        run: |
-          cd apps/cli
-          cargo build --release --target aarch64-apple-darwin
-          mkdir -p ../tray/src-tauri/binaries
-          cp target/aarch64-apple-darwin/release/dybur ../tray/src-tauri/binaries/dybur-aarch64-apple-darwin
-
       - name: Build TypeScript packages
         run: pnpm build
+
+      - name: Copy CLI to resources
+        run: |
+          mkdir -p apps/tray/src-tauri/resources
+          cp packages/cli/dist/cli.js apps/tray/src-tauri/resources/cli.js
+          echo "CLI copied to apps/tray/src-tauri/resources/cli.js"
 
       - name: Import Apple signing certificate
         if: steps.apple-secrets.outputs.available == 'true'

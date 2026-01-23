@@ -17,6 +17,13 @@ pub struct DyburConfig {
     /// Input device (microphone) name to use, None for system default
     #[serde(default)]
     pub input_device: Option<String>,
+    /// Recording mode: "toggle" (press to start/stop) or "push_to_talk" (hold to record)
+    #[serde(default = "default_recording_mode")]
+    pub recording_mode: String,
+}
+
+fn default_recording_mode() -> String {
+    "toggle".to_string()
 }
 
 impl Default for DyburConfig {
@@ -29,6 +36,7 @@ impl Default for DyburConfig {
             model: "parakeet-tdt-0.6b-v3-onnx".to_string(),
             clipboard_cleanup: true,
             input_device: None,
+            recording_mode: default_recording_mode(),
         }
     }
 }

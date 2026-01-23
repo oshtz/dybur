@@ -51,6 +51,12 @@ export interface DyburConfig {
    * @default null
    */
   inputDevice: string | null;
+
+  /**
+   * Recording mode: "toggle" (press to start/stop) or "push_to_talk" (hold to record)
+   * @default "toggle"
+   */
+  recordingMode: 'toggle' | 'push_to_talk';
 }
 
 /**
@@ -64,6 +70,7 @@ export const DEFAULT_CONFIG: DyburConfig = {
   model: 'parakeet-tdt-0.6b-v3-onnx',
   clipboardCleanup: true,
   inputDevice: null,
+  recordingMode: 'toggle',
 };
 
 /**
@@ -221,6 +228,17 @@ export function validateConfig(config: Partial<DyburConfig>): ValidationResult {
         field: 'inputDevice',
         message: 'inputDevice must be a non-empty string or null',
         value: config.inputDevice,
+      });
+    }
+  }
+
+  // Validate recordingMode
+  if (config.recordingMode !== undefined) {
+    if (config.recordingMode !== 'toggle' && config.recordingMode !== 'push_to_talk') {
+      errors.push({
+        field: 'recordingMode',
+        message: 'recordingMode must be "toggle" or "push_to_talk"',
+        value: config.recordingMode,
       });
     }
   }

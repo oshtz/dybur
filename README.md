@@ -24,8 +24,17 @@ Download the latest release from [GitHub Releases](https://github.com/oshtz/dybu
 2. Focus any text field
 3. Press `Ctrl+Shift+Space` (default hotkey)
 4. Speak
-5. Press the hotkey again to stop
+5. Press the hotkey again to stop (or release if using push-to-talk mode)
 6. Text appears in the active field
+
+### Recording Modes
+
+dybur supports two recording modes:
+
+- **Toggle** (default): Press the hotkey to start recording, press again to stop
+- **Push-to-Talk**: Hold the hotkey to record, release to stop and transcribe
+
+You can switch modes from the tray menu (Recording Mode) or by editing the config file.
 
 All settings and controls are available from the tray menu or via CLI:
 
@@ -53,9 +62,20 @@ Config file location:
   "sentenceCase": true,
   "silenceTimeoutMs": 1000,
   "model": "parakeet-tdt-0.6b-v3-onnx",
-  "clipboardCleanup": true
+  "clipboardCleanup": true,
+  "recordingMode": "toggle"
 }
 ```
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `hotkey` | Key combo | Global hotkey to trigger recording |
+| `autoPunctuation` | `true`/`false` | Automatically add punctuation |
+| `sentenceCase` | `true`/`false` | Capitalize first letter of sentences |
+| `silenceTimeoutMs` | Number | Silence detection timeout (ms) |
+| `model` | Model name | Speech recognition model to use |
+| `clipboardCleanup` | `true`/`false` | Restore clipboard after text injection |
+| `recordingMode` | `"toggle"`/`"push_to_talk"` | Recording behavior mode |
 
 ## Requirements
 

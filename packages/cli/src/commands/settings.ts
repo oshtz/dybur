@@ -39,6 +39,7 @@ export async function settingsCommand(args: string[]): Promise<void> {
     keyValue('Silence timeout', `${config.silenceTimeoutMs}ms`);
     keyValue('Model', config.model);
     keyValue('Clipboard cleanup', config.clipboardCleanup ? 'enabled' : 'disabled');
+    keyValue('Recording mode', config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle');
 
     console.log('');
     console.log(`  ${dim('Path:')} ${configPath}`);

@@ -27,8 +27,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/dybur"
+    "resources": [
+      "resources/cli.js"
     ],
     "windows": {
       "certificateThumbprint": null,

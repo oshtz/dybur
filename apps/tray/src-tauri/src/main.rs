@@ -133,12 +133,12 @@ fn main() {
                 .build(app)?;
 
             // Register global hotkey
-            let hotkey = {
+            let (hotkey, recording_mode) = {
                 let state_guard = state.inner().lock().unwrap();
-                state_guard.config.hotkey.clone()
+                (state_guard.config.hotkey.clone(), state_guard.config.recording_mode.clone())
             };
 
-            if let Err(e) = register_hotkey(app.handle(), &hotkey) {
+            if let Err(e) = register_hotkey(app.handle(), &hotkey, &recording_mode) {
                 report_hotkey_error(app.handle(), &hotkey, &e);
             } else {
                 log_info!(
@@ -208,6 +208,9 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     // Devices submenu
     let devices_submenu = build_devices_submenu(app)?;
 
+    // Recording mode submenu
+    let recording_mode_submenu = build_recording_mode_submenu(app)?;
+
     // Settings submenu
     let open_config = MenuItemBuilder::with_id("open_config", "Open Config File").build(app)?;
     let run_diagnostics = MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
@@ -241,6 +244,7 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .separator()
         .item(&models_submenu)
         .item(&devices_submenu)
+        .item(&recording_mode_submenu)
         .separator()
         .item(&settings_submenu)
         .item(&logs)
@@ -355,6 +359,41 @@ fn sanitize_menu_id(s: &str) -> String {
         .collect()
 }
 
+/// Build the Recording Mode submenu
+fn build_recording_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+    let mut submenu = SubmenuBuilder::with_id(app, "recording_mode", "Recording Mode");
+
+    // Get current recording mode
+    let state = app.state::<Mutex<AppState>>();
+    let current_mode = {
+        let state_guard = state.inner().lock().unwrap();
+        state_guard.config.recording_mode.clone()
+    };
+
+    let is_toggle = current_mode != "push_to_talk";
+    let is_ptt = current_mode == "push_to_talk";
+
+    // Toggle mode option
+    let toggle_label = if is_toggle {
+        "● Toggle (press to start/stop)"
+    } else {
+        "  Toggle (press to start/stop)"
+    };
+    let toggle_item = MenuItemBuilder::with_id("mode_toggle", toggle_label).build(app)?;
+    submenu = submenu.item(&toggle_item);
+
+    // Push-to-talk mode option
+    let ptt_label = if is_ptt {
+        "● Push-to-Talk (hold to record)"
+    } else {
+        "  Push-to-Talk (hold to record)"
+    };
+    let ptt_item = MenuItemBuilder::with_id("mode_push_to_talk", ptt_label).build(app)?;
+    submenu = submenu.item(&ptt_item);
+
+    submenu.build()
+}
+
 /// Handle tray menu events
 fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     match event_id {
@@ -401,6 +440,12 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
             if let Some(device) = devices.iter().find(|d| sanitize_menu_id(&d.name) == device_name) {
                 select_device(app, Some(device.name.clone()));
             }
+        }
+        "mode_toggle" => {
+            select_recording_mode(app, "toggle");
+        }
+        "mode_push_to_talk" => {
+            select_recording_mode(app, "push_to_talk");
         }
         _ => {}
     }
@@ -498,12 +543,28 @@ fn show_about(_app: &tauri::AppHandle) {
     show_macos_notification("About dybur", &message);
 }
 
+/// Check if Node.js is installed
+#[cfg(target_os = "macos")]
+fn check_node_installed() -> bool {
+    use std::process::Command;
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Check if CLI is installed and prompt to install on first launch (macOS only)
 #[cfg(target_os = "macos")]
 fn check_and_install_cli(app: &tauri::AppHandle) {
     use std::process::Command;
     use std::path::Path;
-    use tauri_plugin_shell::ShellExt;
+
+    // Check if Node.js is installed
+    if !check_node_installed() {
+        log_info!("service", "Node.js not found, skipping CLI installation. Users can install Node.js to enable CLI.");
+        return;
+    }
 
     let cli_path = Path::new("/usr/local/bin/dybur");
 
@@ -513,61 +574,90 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
         return;
     }
 
-    // Get the sidecar path using Tauri's API
-    // This returns the command, but we need the actual path for symlinking
-    // The sidecar is in Contents/MacOS/ with target triple suffix
-    let exe_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            log_error!("service", "Failed to get executable path: {}", e);
+    // Get the home directory for ~/.dybur
+    let home_dir = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log_error!("service", "Failed to get home directory");
             return;
         }
     };
 
-    let macos_dir = match exe_path.parent() {
-        Some(p) => p,
-        None => {
-            log_error!("service", "Failed to get MacOS directory");
-            return;
-        }
-    };
+    let dybur_dir = home_dir.join(".dybur");
+    let cli_js_path = dybur_dir.join("cli.js");
+    let wrapper_path = dybur_dir.join("bin").join("dybur");
 
-    // Try to find the sidecar - Tauri bundles it without the target triple suffix
-    let possible_names = [
-        "dybur",  // Tauri bundles sidecar without suffix
-        "dybur-aarch64-apple-darwin",
-        "dybur-x86_64-apple-darwin",
-    ];
+    // Find the bundled cli.js resource
+    let cli_js_source = app.path().resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
 
-    let sidecar_path = possible_names
-        .iter()
-        .map(|name| macos_dir.join(name))
-        .find(|p| p.exists());
+    let cli_js_source = match cli_js_source {
+        Ok(p) if p.exists() => p,
+        Ok(p) => {
+            // Try Resources folder in app bundle
+            let exe_path = std::env::current_exe().ok();
+            let resources_path = exe_path.as_ref()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.join("Resources").join("resources").join("cli.js"));
 
-    let sidecar_path = match sidecar_path {
-        Some(p) => p,
-        None => {
-            // Log what we found in the directory for debugging
-            if let Ok(entries) = std::fs::read_dir(macos_dir) {
-                let files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect();
-                log_warn!("service", "Sidecar not found. Files in MacOS dir: {:?}", files);
+            if let Some(res) = resources_path {
+                if res.exists() {
+                    res
+                } else {
+                    log_warn!("service", "CLI resource not found at {} or {:?}", p.display(), res);
+                    return;
+                }
+            } else {
+                log_warn!("service", "CLI resource not found at {}", p.display());
+                return;
             }
-            log_warn!("service", "Sidecar binary not found in {}, skipping CLI install", macos_dir.display());
+        }
+        Err(e) => {
+            log_warn!("service", "Failed to resolve CLI resource path: {}", e);
             return;
         }
     };
 
-    log_info!("service", "Found sidecar at: {}", sidecar_path.display());
-    log_info!("service", "Installing CLI to /usr/local/bin/dybur...");
+    log_info!("service", "Found CLI at: {}", cli_js_source.display());
+    log_info!("service", "Installing CLI...");
 
-    // Use osascript to run with administrator privileges
-    // This will show the macOS password dialog
+    // Create directories
+    if let Err(e) = std::fs::create_dir_all(&dybur_dir) {
+        log_error!("service", "Failed to create dybur directory: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(dybur_dir.join("bin")) {
+        log_error!("service", "Failed to create bin directory: {}", e);
+        return;
+    }
+
+    // Copy cli.js to ~/.dybur/
+    if let Err(e) = std::fs::copy(&cli_js_source, &cli_js_path) {
+        log_error!("service", "Failed to copy CLI: {}", e);
+        return;
+    }
+
+    // Create wrapper shell script
+    let wrapper_content = format!(
+        "#!/bin/bash\nexec node \"{}\" \"$@\"\n",
+        cli_js_path.display()
+    );
+    if let Err(e) = std::fs::write(&wrapper_path, &wrapper_content) {
+        log_error!("service", "Failed to create CLI wrapper: {}", e);
+        return;
+    }
+
+    // Make wrapper executable
+    let _ = Command::new("chmod")
+        .args(["+x", &wrapper_path.to_string_lossy()])
+        .output();
+
+    log_info!("service", "CLI wrapper created at {}", wrapper_path.display());
+
+    // Use osascript to symlink with administrator privileges
     let script = format!(
         r#"do shell script "mkdir -p /usr/local/bin && ln -sf '{}' /usr/local/bin/dybur" with administrator privileges"#,
-        sidecar_path.display()
+        wrapper_path.display()
     );
 
     let result = Command::new("osascript")
@@ -597,12 +687,29 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
     }
 }
 
+/// Check if Node.js is installed
+#[cfg(target_os = "windows")]
+fn check_node_installed() -> bool {
+    use std::process::Command;
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Check if CLI is installed and install on first launch (Windows only)
 #[cfg(target_os = "windows")]
-fn check_and_install_cli_windows(_app: &tauri::AppHandle) {
+fn check_and_install_cli_windows(app: &tauri::AppHandle) {
     use std::process::Command;
 
-    // Get the bin directory path (~/.dybur/bin)
+    // Check if Node.js is installed
+    if !check_node_installed() {
+        log_info!("service", "Node.js not found, skipping CLI installation. Users can install Node.js to enable CLI.");
+        return;
+    }
+
+    // Get the dybur directory path (~/.dybur)
     let home_dir = match dirs::home_dir() {
         Some(h) => h,
         None => {
@@ -611,75 +718,79 @@ fn check_and_install_cli_windows(_app: &tauri::AppHandle) {
         }
     };
 
-    let bin_dir = home_dir.join(".dybur").join("bin");
-    let cli_path = bin_dir.join("dybur.exe");
+    let dybur_dir = home_dir.join(".dybur");
+    let bin_dir = dybur_dir.join("bin");
+    let cli_js_path = dybur_dir.join("cli.js");
+    let cli_cmd_path = bin_dir.join("dybur.cmd");
 
     // Check if already installed
-    if cli_path.exists() {
-        log_info!("service", "CLI already installed at {}", cli_path.display());
+    if cli_cmd_path.exists() && cli_js_path.exists() {
+        log_info!("service", "CLI already installed at {}", cli_cmd_path.display());
         return;
     }
 
-    // Get the sidecar path - the CLI bundled with the app
-    let exe_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            log_error!("service", "Failed to get executable path: {}", e);
-            return;
-        }
-    };
+    // Find the bundled cli.js resource
+    let cli_js_source = app.path().resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
 
-    let exe_dir = match exe_path.parent() {
-        Some(p) => p,
-        None => {
-            log_error!("service", "Failed to get executable directory");
-            return;
-        }
-    };
+    let cli_js_source = match cli_js_source {
+        Ok(p) if p.exists() => p,
+        Ok(p) => {
+            // Try alternative paths for development
+            let exe_path = std::env::current_exe().ok();
+            let dev_path = exe_path.as_ref()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.join("resources").join("cli.js"));
 
-    // Try to find the sidecar binary
-    let possible_names = [
-        "dybur.exe",
-        "dybur-x86_64-pc-windows-msvc.exe",
-    ];
-
-    let sidecar_path = possible_names
-        .iter()
-        .map(|name| exe_dir.join(name))
-        .find(|p| p.exists() && p != &exe_path); // Don't use the main app exe
-
-    let sidecar_path = match sidecar_path {
-        Some(p) => p,
-        None => {
-            // Log what we found in the directory for debugging
-            if let Ok(entries) = std::fs::read_dir(exe_dir) {
-                let files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect();
-                log_warn!("service", "Sidecar not found. Files in exe dir: {:?}", files);
+            if let Some(dev) = dev_path {
+                if dev.exists() {
+                    dev
+                } else {
+                    log_warn!("service", "CLI resource not found at {} or {}", p.display(), dev.display());
+                    return;
+                }
+            } else {
+                log_warn!("service", "CLI resource not found at {}", p.display());
+                return;
             }
-            log_warn!("service", "Sidecar binary not found in {}, skipping CLI install", exe_dir.display());
+        }
+        Err(e) => {
+            log_warn!("service", "Failed to resolve CLI resource path: {}", e);
             return;
         }
     };
 
-    log_info!("service", "Found sidecar at: {}", sidecar_path.display());
-    log_info!("service", "Installing CLI to {}...", cli_path.display());
+    log_info!("service", "Found CLI at: {}", cli_js_source.display());
+    log_info!("service", "Installing CLI...");
 
-    // Create bin directory
+    // Create directories
+    if let Err(e) = std::fs::create_dir_all(&dybur_dir) {
+        log_error!("service", "Failed to create dybur directory: {}", e);
+        return;
+    }
     if let Err(e) = std::fs::create_dir_all(&bin_dir) {
         log_error!("service", "Failed to create bin directory: {}", e);
         return;
     }
 
-    // Copy sidecar to bin directory
-    if let Err(e) = std::fs::copy(&sidecar_path, &cli_path) {
+    // Copy cli.js to ~/.dybur/
+    if let Err(e) = std::fs::copy(&cli_js_source, &cli_js_path) {
         log_error!("service", "Failed to copy CLI: {}", e);
         return;
     }
 
-    log_info!("service", "CLI copied to {}", cli_path.display());
+    // Create wrapper script (dybur.cmd)
+    let wrapper_content = format!(
+        "@echo off\r\nnode \"{}\" %*\r\n",
+        cli_js_path.to_string_lossy().replace('/', "\\")
+    );
+    if let Err(e) = std::fs::write(&cli_cmd_path, &wrapper_content) {
+        log_error!("service", "Failed to create CLI wrapper: {}", e);
+        return;
+    }
+
+    log_info!("service", "CLI installed to {}", cli_cmd_path.display());
 
     // Add to PATH using PowerShell
     let bin_dir_str = bin_dir.to_string_lossy().to_string();
@@ -727,65 +838,18 @@ fn check_and_install_cli_windows(_app: &tauri::AppHandle) {
 /// Install CLI to system PATH (macOS/Linux only) - triggered from menu
 #[cfg(not(target_os = "windows"))]
 fn install_cli_to_path(app: &tauri::AppHandle) {
-    use tauri_plugin_shell::ShellExt;
+    // Check if Node.js is installed first
+    if !check_node_installed() {
+        log_warn!("service", "Node.js not found, cannot install CLI");
+        show_macos_notification(
+            "Node.js Required",
+            "Please install Node.js to use the CLI.\nVisit: https://nodejs.org",
+        );
+        return;
+    }
 
-    log_info!("service", "Installing CLI to PATH...");
-
-    // Get the sidecar command
-    let sidecar = app.shell().sidecar("dybur").unwrap();
-
-    // Run the setup command
-    let (mut rx, _child) = match sidecar.args(["setup"]).spawn() {
-        Ok(result) => result,
-        Err(e) => {
-            log_error!("service", "Failed to run CLI setup: {}", e);
-            show_macos_notification("CLI Install Failed", &format!("Error: {}", e));
-            return;
-        }
-    };
-
-    // Handle output asynchronously
-    std::thread::spawn(move || {
-        use tauri_plugin_shell::process::CommandEvent;
-
-        let mut output = String::new();
-        while let Some(event) = rx.blocking_recv() {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    if let Ok(text) = String::from_utf8(line) {
-                        output.push_str(&text);
-                        log_info!("service", "CLI setup: {}", text.trim());
-                    }
-                }
-                CommandEvent::Stderr(line) => {
-                    if let Ok(text) = String::from_utf8(line) {
-                        output.push_str(&text);
-                        log_warn!("service", "CLI setup: {}", text.trim());
-                    }
-                }
-                CommandEvent::Terminated(status) => {
-                    if status.code == Some(0) || output.contains("successfully") || output.contains("already installed") {
-                        log_info!("service", "CLI installed to PATH successfully");
-                        show_macos_notification(
-                            "CLI Installed",
-                            "You can now use 'dybur' from any terminal.",
-                        );
-                    } else if output.contains("Permission denied") {
-                        log_warn!("service", "CLI install needs sudo");
-                        show_macos_notification(
-                            "CLI Install",
-                            "Run this in terminal:\nsudo /Applications/dybur.app/Contents/MacOS/dybur setup",
-                        );
-                    } else {
-                        log_error!("service", "CLI install failed: {}", output.trim());
-                        show_macos_notification("CLI Install Failed", &output.trim());
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
+    // Use the same installation logic as the auto-install
+    check_and_install_cli(app);
 }
 
 /// Select an audio input device
@@ -812,6 +876,69 @@ fn select_device(app: &tauri::AppHandle, device_name: Option<String>) {
 
     // Rebuild the menu to reflect the new selection
     rebuild_tray_menu(app);
+}
+
+/// Select recording mode (toggle or push_to_talk)
+fn select_recording_mode(app: &tauri::AppHandle, mode: &str) {
+    let state = app.state::<Mutex<AppState>>();
+    let (prev_mode, hotkey) = {
+        let mut state_guard = state.inner().lock().unwrap();
+
+        let prev_mode = state_guard.config.recording_mode.clone();
+
+        // No change needed
+        if prev_mode == mode {
+            return;
+        }
+
+        state_guard.config.recording_mode = mode.to_string();
+
+        // Save config
+        if let Err(e) = save_config(&state_guard.config) {
+            log_error!("config", "Failed to save config: {}", e);
+            // Restore previous value
+            state_guard.config.recording_mode = prev_mode;
+            return;
+        }
+
+        let hotkey = state_guard.config.hotkey.clone();
+        (prev_mode, hotkey)
+    };
+
+    let mode_display = if mode == "push_to_talk" { "push-to-talk" } else { "toggle" };
+    log_info!("config", "Recording mode changed to: {}", mode_display);
+
+    // Unregister old hotkey and register with new mode
+    if let Err(e) = reregister_hotkey(app, &hotkey, mode) {
+        log_error!("hotkey", "Failed to re-register hotkey: {}", e);
+        // Restore previous mode in config
+        let mut state_guard = state.inner().lock().unwrap();
+        state_guard.config.recording_mode = prev_mode.clone();
+        let _ = save_config(&state_guard.config);
+        return;
+    }
+
+    // Rebuild the menu to reflect the new selection
+    rebuild_tray_menu(app);
+}
+
+/// Unregister and re-register the hotkey with a new recording mode
+fn reregister_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    let shortcut: Shortcut = hotkey.parse().map_err(|e| {
+        format!("Invalid hotkey format '{}': {}", hotkey, e)
+    })?;
+
+    // Unregister the existing shortcut
+    app.global_shortcut()
+        .unregister(shortcut)
+        .map_err(|e| format!("Failed to unregister shortcut: {}", e))?;
+
+    // Re-register with new mode
+    register_hotkey(app, hotkey, recording_mode)?;
+
+    Ok(())
 }
 
 /// Spawn model download in background
@@ -937,165 +1064,192 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
     }
 }
 
-/// Toggle recording state
-fn toggle_recording(app: &tauri::AppHandle) {
+/// Start recording audio
+fn start_recording(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<AppState>>();
     let mut state_guard = state.inner().lock().unwrap();
 
+    // Already recording, nothing to do
     if state_guard.is_recording {
-        // Stop recording and process audio
-        let audio_data: Option<Vec<f32>> = AUDIO_CAPTURE.with(|capture| {
-            capture.borrow_mut().take().map(|mut cap| cap.stop())
-        });
-        
-        state_guard.set_recording(false);
-        set_overlay_state(app, RecordingState::Idle);
-        log_info!("audio", "Recording stopped");
-        
-        // Get config for clipboard cleanup setting
-        let restore_clipboard = state_guard.config.clipboard_cleanup;
-        
-        // Release the state lock before processing
-        drop(state_guard);
-        
-        // Process audio with STT if we have audio data
-        if let Some(audio) = audio_data {
-            if audio.len() < 1600 {
-                // Less than 100ms of audio - too short
-                log_warn!("audio", "Recording too short ({} samples), skipping transcription", audio.len());
-                update_tray_status(app, "Too short");
-                return;
-            }
-            
-            update_tray_status(app, "Transcribing...");
-            
-            // Run STT inference
-            let transcription_result = {
-                let mut engine = STT_ENGINE.lock().unwrap();
-                if !engine.is_ready() {
-                    log_warn!("model", "STT model not loaded, cannot transcribe");
-                    None
-                } else {
-                    match engine.transcribe(&audio) {
-                        Ok(result) => Some(result),
-                        Err(e) => {
-                            log_error!("model", "Transcription failed: {}", e);
-                            None
-                        }
-                    }
-                }
-            };
-            
-            // Inject transcribed text
-            if let Some(result) = transcription_result {
-                if result.text.is_empty() {
-                    log_info!("model", "Transcription returned empty text");
-                    update_tray_status(app, "No speech detected");
-                } else {
-                    log_info!(
-                        "model",
-                        "Transcribed {} chars in {}ms ({}x realtime)",
-                        result.text.len(),
-                        result.inference_time_ms,
-                        format!("{:.1}", result.audio_duration_s * 1000.0 / result.inference_time_ms as f32)
-                    );
-                    
-                    // Check if FTUE window exists - if so, emit directly instead of clipboard paste
-                    // (clipboard paste doesn't work reliably in our own webview windows)
-                    let ftue_exists = app.get_webview_window("ftue").is_some();
+        log_info!("audio", "Already recording, ignoring start request");
+        return;
+    }
 
-                    if ftue_exists {
-                        // Emit transcription directly to FTUE window
-                        let _ = app.emit_to("ftue", "ftue:transcription", &result.text);
-                        log_info!("injection", "Text emitted to FTUE window");
-                        update_tray_status(app, "Done");
-                    } else {
-                        // Inject the text into the active application
-                        match inject_text(&result.text, restore_clipboard) {
-                            Ok(()) => {
-                                log_info!("injection", "Text injected successfully");
-                                update_tray_status(app, "Done");
-                            }
-                            Err(e) => {
-                                log_error!("injection", "Failed to inject text: {}", e);
-                                update_tray_status(app, "Injection failed");
-                            }
-                        }
-                    }
-                }
-            } else {
-                update_tray_status(app, "Transcription failed");
-            }
-        } else {
-            update_tray_status(app, "No audio captured");
+    state_guard.clear_error();
+
+    // Check if STT model is loaded
+    {
+        let engine = STT_ENGINE.lock().unwrap();
+        if !engine.is_ready() {
+            log_error!("model", "STT model not loaded. Run 'dybur models prefetch' first.");
+            state_guard.set_error("STT model not loaded. Run 'dybur models prefetch' first.".to_string());
+            update_tray_status(app, "Model not loaded");
+
+            // Show native alert to user - must be done in a separate thread to not block
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let title = "Speech Model Required";
+                let message = "The speech recognition model is not installed.\n\n\
+                    Dictation requires the model to be downloaded first.\n\n\
+                    Right-click the dybur tray icon and select:\n\
+                    Models > Download Model";
+
+                #[cfg(target_os = "windows")]
+                show_windows_alert(title, message);
+
+                #[cfg(target_os = "macos")]
+                show_macos_alert(title, message);
+            });
+            return;
         }
-        
-        // Reset status after a short delay
-        let app_handle = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            update_tray_status(&app_handle, "Idle");
-        });
-    } else {
-        // Start recording
-        state_guard.clear_error();
-        
-        // Check if STT model is loaded
-        {
-            let engine = STT_ENGINE.lock().unwrap();
-            if !engine.is_ready() {
-                log_error!("model", "STT model not loaded. Run 'dybur models prefetch' first.");
-                state_guard.set_error("STT model not loaded. Run 'dybur models prefetch' first.".to_string());
-                update_tray_status(app, "Model not loaded");
+    }
 
-                // Show native alert to user - must be done in a separate thread to not block
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let title = "Speech Model Required";
-                    let message = "The speech recognition model is not installed.\n\n\
-                        Dictation requires the model to be downloaded first.\n\n\
-                        Right-click the dybur tray icon and select:\n\
-                        Models > Download Model";
-
-                    #[cfg(target_os = "windows")]
-                    show_windows_alert(title, message);
-
-                    #[cfg(target_os = "macos")]
-                    show_macos_alert(title, message);
-                });
-                return;
-            }
-        }
-        
-        // Initialize and start audio capture
-        let input_device = state_guard.config.input_device.clone();
-        match AudioCapture::new() {
-            Ok(mut capture) => {
-                if let Err(e) = capture.start(input_device.as_deref()) {
-                    let help = get_audio_error_help(&e);
-                    let error_msg = format!("{}\n\n{}", e, help);
-                    state_guard.set_error(error_msg.clone());
-                    log_error!("audio", "Failed to start recording: {}", error_msg);
-                    update_tray_status(app, "Error: Recording failed");
-                    return;
-                }
-                AUDIO_CAPTURE.with(|cap| {
-                    *cap.borrow_mut() = Some(capture);
-                });
-                state_guard.set_recording(true);
-                set_overlay_state(app, RecordingState::Recording);
-                log_info!("audio", "Recording started");
-                update_tray_status(app, "Recording...");
-            }
-            Err(e) => {
+    // Initialize and start audio capture
+    let input_device = state_guard.config.input_device.clone();
+    match AudioCapture::new() {
+        Ok(mut capture) => {
+            if let Err(e) = capture.start(input_device.as_deref()) {
                 let help = get_audio_error_help(&e);
                 let error_msg = format!("{}\n\n{}", e, help);
                 state_guard.set_error(error_msg.clone());
-                set_overlay_state(app, RecordingState::Idle);
-                log_error!("audio", "Failed to initialize audio: {}", error_msg);
-                update_tray_status(app, "Error: Audio init failed");
+                log_error!("audio", "Failed to start recording: {}", error_msg);
+                update_tray_status(app, "Error: Recording failed");
+                return;
             }
+            AUDIO_CAPTURE.with(|cap| {
+                *cap.borrow_mut() = Some(capture);
+            });
+            state_guard.set_recording(true);
+            set_overlay_state(app, RecordingState::Recording);
+            log_info!("audio", "Recording started");
+            update_tray_status(app, "Recording...");
         }
+        Err(e) => {
+            let help = get_audio_error_help(&e);
+            let error_msg = format!("{}\n\n{}", e, help);
+            state_guard.set_error(error_msg.clone());
+            set_overlay_state(app, RecordingState::Idle);
+            log_error!("audio", "Failed to initialize audio: {}", error_msg);
+            update_tray_status(app, "Error: Audio init failed");
+        }
+    }
+}
+
+/// Stop recording and process audio
+fn stop_recording(app: &tauri::AppHandle) {
+    let state = app.state::<Mutex<AppState>>();
+    let mut state_guard = state.inner().lock().unwrap();
+
+    // Not recording, nothing to do
+    if !state_guard.is_recording {
+        log_info!("audio", "Not recording, ignoring stop request");
+        return;
+    }
+
+    // Stop recording and get audio data
+    let audio_data: Option<Vec<f32>> = AUDIO_CAPTURE.with(|capture| {
+        capture.borrow_mut().take().map(|mut cap| cap.stop())
+    });
+
+    state_guard.set_recording(false);
+    set_overlay_state(app, RecordingState::Idle);
+    log_info!("audio", "Recording stopped");
+
+    // Get config for clipboard cleanup setting
+    let restore_clipboard = state_guard.config.clipboard_cleanup;
+
+    // Release the state lock before processing
+    drop(state_guard);
+
+    // Process audio with STT if we have audio data
+    if let Some(audio) = audio_data {
+        if audio.len() < 1600 {
+            // Less than 100ms of audio - too short
+            log_warn!("audio", "Recording too short ({} samples), skipping transcription", audio.len());
+            update_tray_status(app, "Too short");
+            return;
+        }
+
+        update_tray_status(app, "Transcribing...");
+
+        // Run STT inference
+        let transcription_result = {
+            let mut engine = STT_ENGINE.lock().unwrap();
+            if !engine.is_ready() {
+                log_warn!("model", "STT model not loaded, cannot transcribe");
+                None
+            } else {
+                match engine.transcribe(&audio) {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        log_error!("model", "Transcription failed: {}", e);
+                        None
+                    }
+                }
+            }
+        };
+
+        // Inject transcribed text
+        if let Some(result) = transcription_result {
+            if result.text.is_empty() {
+                log_info!("model", "Transcription returned empty text");
+                update_tray_status(app, "No speech detected");
+            } else {
+                log_info!(
+                    "model",
+                    "Transcribed {} chars in {}ms ({}x realtime)",
+                    result.text.len(),
+                    result.inference_time_ms,
+                    format!("{:.1}", result.audio_duration_s * 1000.0 / result.inference_time_ms as f32)
+                );
+
+                // Check if FTUE window exists - if so, emit directly instead of clipboard paste
+                // (clipboard paste doesn't work reliably in our own webview windows)
+                let ftue_exists = app.get_webview_window("ftue").is_some();
+
+                if ftue_exists {
+                    // Emit transcription directly to FTUE window
+                    let _ = app.emit_to("ftue", "ftue:transcription", &result.text);
+                    log_info!("injection", "Text emitted to FTUE window");
+                    update_tray_status(app, "Done");
+                } else {
+                    // Inject the text into the active application
+                    match inject_text(&result.text, restore_clipboard) {
+                        Ok(()) => {
+                            log_info!("injection", "Text injected successfully");
+                            update_tray_status(app, "Done");
+                        }
+                        Err(e) => {
+                            log_error!("injection", "Failed to inject text: {}", e);
+                            update_tray_status(app, "Injection failed");
+                        }
+                    }
+                }
+            }
+        } else {
+            update_tray_status(app, "Transcription failed");
+        }
+    } else {
+        update_tray_status(app, "No audio captured");
+    }
+
+    // Reset status after a short delay
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        update_tray_status(&app_handle, "Idle");
+    });
+}
+
+/// Toggle recording state (for toggle mode)
+fn toggle_recording(app: &tauri::AppHandle) {
+    let state = app.state::<Mutex<AppState>>();
+    let is_recording = state.inner().lock().unwrap().is_recording;
+
+    if is_recording {
+        stop_recording(app);
+    } else {
+        start_recording(app);
     }
 }
 
@@ -1232,7 +1386,7 @@ fn open_logs(app: &tauri::AppHandle) {
 }
 
 /// Register global hotkey
-fn register_hotkey(app: &tauri::AppHandle, hotkey: &str) -> Result<(), String> {
+fn register_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::Shortcut;
 
     let shortcut: Shortcut = hotkey.parse().map_err(|e| {
@@ -1242,10 +1396,27 @@ fn register_hotkey(app: &tauri::AppHandle, hotkey: &str) -> Result<(), String> {
     })?;
 
     let app_handle = app.clone();
+    let is_push_to_talk = recording_mode == "push_to_talk";
+
+    if is_push_to_talk {
+        log_info!("hotkey", "Using push-to-talk mode: hold {} to record", hotkey);
+    } else {
+        log_info!("hotkey", "Using toggle mode: press {} to start/stop", hotkey);
+    }
+
     app.global_shortcut()
         .on_shortcut(shortcut, move |_app, _shortcut, event| {
-            if event.state == ShortcutState::Pressed {
-                toggle_recording(&app_handle);
+            if is_push_to_talk {
+                // Push-to-talk mode: hold to record, release to stop
+                match event.state {
+                    ShortcutState::Pressed => start_recording(&app_handle),
+                    ShortcutState::Released => stop_recording(&app_handle),
+                }
+            } else {
+                // Toggle mode: press to start/stop
+                if event.state == ShortcutState::Pressed {
+                    toggle_recording(&app_handle);
+                }
             }
         })
         .map_err(|e| {
