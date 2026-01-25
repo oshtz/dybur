@@ -34,8 +34,8 @@ export interface DyburConfig {
   silenceTimeoutMs: number;
 
   /**
-   * Speech recognition model to use
-   * @default "parakeet-tdt-0.6b-v3-onnx"
+   * Speech recognition model ID to use
+   * @default "parakeet-tdt-v3-int8"
    */
   model: string;
 
@@ -94,7 +94,7 @@ export const DEFAULT_CONFIG: DyburConfig = {
   autoPunctuation: true,
   sentenceCase: true,
   silenceTimeoutMs: 1000,
-  model: 'parakeet-tdt-0.6b-v3-onnx',
+  model: 'parakeet-tdt-v3-int8',
   clipboardCleanup: true,
   inputDevice: null,
   recordingMode: 'toggle',

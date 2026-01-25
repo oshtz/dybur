@@ -61,7 +61,7 @@ impl Default for DyburConfig {
             auto_punctuation: true,
             sentence_case: true,
             silence_timeout_ms: 1000,
-            model: "parakeet-tdt-0.6b-v3-onnx".to_string(),
+            model: "parakeet-tdt-v3-int8".to_string(),
             clipboard_cleanup: true,
             input_device: None,
             recording_mode: default_recording_mode(),

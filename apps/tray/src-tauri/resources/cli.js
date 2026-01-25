@@ -19,10 +19,14 @@ var DEFAULT_CONFIG = {
   autoPunctuation: true,
   sentenceCase: true,
   silenceTimeoutMs: 1e3,
-  model: "parakeet-tdt-0.6b-v3-onnx",
+  model: "parakeet-tdt-v3-int8",
   clipboardCleanup: true,
   inputDevice: null,
-  recordingMode: "toggle"
+  recordingMode: "toggle",
+  vadEnabled: true,
+  vadThreshold: 0.5,
+  vadMinSpeechMs: 250,
+  gpuMode: "auto"
 };
 var VALID_MODIFIERS = ["Ctrl", "Alt", "Shift", "Meta", "Cmd", "Win"];
 function validateHotkey(hotkey) {
@@ -144,6 +148,52 @@ function validateConfig(config) {
       });
     }
   }
+  if (config.vadEnabled !== void 0 && typeof config.vadEnabled !== "boolean") {
+    errors.push({
+      field: "vadEnabled",
+      message: "vadEnabled must be a boolean",
+      value: config.vadEnabled
+    });
+  }
+  if (config.vadThreshold !== void 0) {
+    if (typeof config.vadThreshold !== "number") {
+      errors.push({
+        field: "vadThreshold",
+        message: "vadThreshold must be a number",
+        value: config.vadThreshold
+      });
+    } else if (config.vadThreshold < 0 || config.vadThreshold > 1) {
+      errors.push({
+        field: "vadThreshold",
+        message: "vadThreshold must be between 0.0 and 1.0",
+        value: config.vadThreshold
+      });
+    }
+  }
+  if (config.vadMinSpeechMs !== void 0) {
+    if (typeof config.vadMinSpeechMs !== "number") {
+      errors.push({
+        field: "vadMinSpeechMs",
+        message: "vadMinSpeechMs must be a number",
+        value: config.vadMinSpeechMs
+      });
+    } else if (config.vadMinSpeechMs < 0 || config.vadMinSpeechMs > 5e3) {
+      errors.push({
+        field: "vadMinSpeechMs",
+        message: "vadMinSpeechMs must be between 0 and 5000",
+        value: config.vadMinSpeechMs
+      });
+    }
+  }
+  if (config.gpuMode !== void 0) {
+    if (config.gpuMode !== "auto" && config.gpuMode !== "cpu") {
+      errors.push({
+        field: "gpuMode",
+        message: 'gpuMode must be "auto" or "cpu"',
+        value: config.gpuMode
+      });
+    }
+  }
   return {
     valid: errors.length === 0,
     errors
@@ -159,8 +209,8 @@ function mergeWithDefaults(userConfig, onWarning) {
     }
   }
   if (onWarning) {
-    for (const error2 of validation.errors) {
-      onWarning(error2.field, `${error2.message}. Using default value.`);
+    for (const error3 of validation.errors) {
+      onWarning(error3.field, `${error3.message}. Using default value.`);
     }
   }
   return result;
@@ -262,8 +312,8 @@ function loadConfig(options = {}) {
       try {
         saveConfig(DEFAULT_CONFIG, { path, logger });
         logger.debug(`Created default config at ${path}`);
-      } catch (error2) {
-        logger.warn(`Failed to create default config: ${error2}`);
+      } catch (error3) {
+        logger.warn(`Failed to create default config: ${error3}`);
       }
     }
     return { ...DEFAULT_CONFIG };
@@ -272,11 +322,11 @@ function loadConfig(options = {}) {
   try {
     const content = readFileSync(path, "utf-8");
     userConfig = JSON.parse(content);
-  } catch (error2) {
-    if (error2 instanceof SyntaxError) {
-      logger.error(`Invalid JSON in config file: ${error2.message}`);
+  } catch (error3) {
+    if (error3 instanceof SyntaxError) {
+      logger.error(`Invalid JSON in config file: ${error3.message}`);
     } else {
-      logger.error(`Failed to read config file: ${error2}`);
+      logger.error(`Failed to read config file: ${error3}`);
     }
     logger.warn("Using default configuration");
     return { ...DEFAULT_CONFIG };
@@ -298,16 +348,16 @@ function saveConfig(config, options = {}) {
     try {
       mkdirSync(dir, { recursive: true });
       logger.debug(`Created config directory: ${dir}`);
-    } catch (error2) {
-      throw new Error(`Failed to create config directory: ${error2}`);
+    } catch (error3) {
+      throw new Error(`Failed to create config directory: ${error3}`);
     }
   }
   try {
     const content = JSON.stringify(config, null, 2);
     writeFileSync(path, content, "utf-8");
     logger.debug(`Saved config to ${path}`);
-  } catch (error2) {
-    throw new Error(`Failed to write config file: ${error2}`);
+  } catch (error3) {
+    throw new Error(`Failed to write config file: ${error3}`);
   }
 }
 function updateConfig(updates, options = {}) {
@@ -315,8 +365,8 @@ function updateConfig(updates, options = {}) {
   const currentConfig = loadConfig(options);
   const validation = validateConfig(updates);
   if (!validation.valid) {
-    for (const error2 of validation.errors) {
-      logger.warn(`Ignoring invalid update for ${error2.field}: ${error2.message}`);
+    for (const error3 of validation.errors) {
+      logger.warn(`Ignoring invalid update for ${error3.field}: ${error3.message}`);
     }
   }
   const invalidFields = new Set(validation.errors.map((e) => e.field));
@@ -332,26 +382,185 @@ function updateConfig(updates, options = {}) {
 }
 
 // ../core/dist/models.js
-var DEFAULT_MODEL = "parakeet-tdt-0.6b-v3-onnx";
-var MODEL_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx";
-var MODEL_BASE_URL = `https://huggingface.co/${MODEL_REPO}/resolve/main`;
-var MODEL_FILES = {
-  full: [
-    "encoder-model.onnx",
-    "encoder-model.onnx.data",
-    "decoder_joint-model.onnx",
-    "nemo128.onnx",
-    "vocab.txt",
-    "config.json"
-  ],
-  int8: [
-    "encoder-model.int8.onnx",
-    "decoder_joint-model.int8.onnx",
-    "nemo128.onnx",
-    "vocab.txt",
-    "config.json"
-  ]
-};
+var MODEL_REGISTRY = [
+  // Parakeet TDT v2 - English only
+  {
+    id: "parakeet-tdt-v2-int8",
+    displayName: "Parakeet TDT v2 (English)",
+    description: "Fast, English-optimized transducer model",
+    architecture: "tdt_transducer",
+    repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    files: [
+      { name: "encoder-model.int8.onnx", role: "encoder", required: true },
+      { name: "decoder_joint-model.int8.onnx", role: "decoder", required: true },
+      { name: "nemo128.onnx", role: "preprocessor", required: false },
+      { name: "vocab.txt", role: "vocab", required: true },
+      { name: "config.json", role: "config", required: false }
+    ],
+    sizeBytes: 661e6,
+    languages: ["en"],
+    isDefault: false,
+    config: {
+      vocabType: "text_file",
+      sampleRate: 16e3,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 1440
+    }
+  },
+  // Parakeet TDT v3 - Multilingual (DEFAULT)
+  {
+    id: "parakeet-tdt-v3-int8",
+    displayName: "Parakeet TDT v3 (Multilingual)",
+    description: "Balanced accuracy, 25 languages",
+    architecture: "tdt_transducer",
+    repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+    files: [
+      { name: "encoder-model.int8.onnx", role: "encoder", required: true },
+      { name: "decoder_joint-model.int8.onnx", role: "decoder", required: true },
+      { name: "nemo128.onnx", role: "preprocessor", required: false },
+      { name: "vocab.txt", role: "vocab", required: true },
+      { name: "config.json", role: "config", required: false }
+    ],
+    sizeBytes: 67e7,
+    languages: ["en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "uk", "ja", "ko", "zh"],
+    isDefault: true,
+    config: {
+      vocabType: "text_file",
+      sampleRate: 16e3,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 1440
+    }
+  },
+  // Nemotron Streaming - English
+  {
+    id: "nemotron-streaming-int8",
+    displayName: "Nemotron Streaming (English)",
+    description: "Low-latency streaming transducer",
+    architecture: "streaming_transducer",
+    repo: "csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14",
+    files: [
+      { name: "encoder.int8.onnx", role: "encoder", required: true },
+      { name: "decoder.int8.onnx", role: "decoder", required: true },
+      { name: "joiner.int8.onnx", role: "joiner", required: true },
+      { name: "tokens.txt", role: "vocab", required: true }
+    ],
+    sizeBytes: 663e6,
+    languages: ["en"],
+    isDefault: false,
+    config: {
+      vocabType: "text_file",
+      sampleRate: 16e3,
+      nMels: 80,
+      supportsStreaming: true,
+      maxDurationS: 1440
+    }
+  },
+  // Whisper Large v3 Turbo - INT8
+  {
+    id: "whisper-large-v3-turbo-int8",
+    displayName: "Whisper Large v3 Turbo (INT8)",
+    description: "Popular model, 99 languages, balanced",
+    architecture: "encoder_decoder",
+    repo: "onnx-community/whisper-large-v3-turbo",
+    files: [
+      { name: "onnx/encoder_model_int8.onnx", role: "encoder", required: true },
+      { name: "onnx/decoder_model_int8.onnx", role: "decoder", required: true },
+      { name: "tokenizer.json", role: "vocab", required: true },
+      { name: "config.json", role: "config", required: false },
+      { name: "generation_config.json", role: "config", required: false }
+    ],
+    sizeBytes: 11e8,
+    languages: [],
+    // All languages
+    isDefault: false,
+    config: {
+      vocabType: "bpe",
+      sampleRate: 16e3,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 30
+    }
+  },
+  // Whisper Large v3 Turbo - FP16
+  {
+    id: "whisper-large-v3-turbo-fp16",
+    displayName: "Whisper Large v3 Turbo (FP16)",
+    description: "High accuracy, 99 languages",
+    architecture: "encoder_decoder",
+    repo: "onnx-community/whisper-large-v3-turbo",
+    files: [
+      { name: "onnx/encoder_model_fp16.onnx", role: "encoder", required: true },
+      { name: "onnx/decoder_model_fp16.onnx", role: "decoder", required: true },
+      { name: "tokenizer.json", role: "vocab", required: true },
+      { name: "config.json", role: "config", required: false },
+      { name: "generation_config.json", role: "config", required: false }
+    ],
+    sizeBytes: 16e8,
+    languages: [],
+    isDefault: false,
+    config: {
+      vocabType: "bpe",
+      sampleRate: 16e3,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 30
+    }
+  },
+  // Canary Qwen 2.5B - FP16
+  {
+    id: "canary-qwen-2.5b-fp16",
+    displayName: "Canary Qwen 2.5B (FP16)",
+    description: "Maximum accuracy, LLM-powered",
+    architecture: "llm_decoder",
+    repo: "onnx-community/canary-qwen-2.5b-ONNX",
+    files: [
+      { name: "onnx/decoder_model_merged_fp16.onnx", role: "decoder", required: true },
+      { name: "onnx/decoder_model_merged_fp16.onnx_data", role: "decoder_data", required: true },
+      { name: "onnx/decoder_model_merged_fp16.onnx_data_1", role: "decoder_data", required: true },
+      { name: "onnx/embed_tokens.onnx", role: "embeddings", required: true },
+      { name: "onnx/embed_tokens.onnx_data", role: "embeddings_data", required: true },
+      { name: "tokenizer.json", role: "vocab", required: true },
+      { name: "config.json", role: "config", required: false }
+    ],
+    sizeBytes: 47e8,
+    languages: [],
+    // Multilingual
+    isDefault: false,
+    config: {
+      vocabType: "bpe",
+      sampleRate: 16e3,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 60
+    }
+  }
+];
+function getModelDefinition(modelId) {
+  return MODEL_REGISTRY.find((m) => m.id === modelId);
+}
+function getDefaultModelDefinition() {
+  const defaultModel = MODEL_REGISTRY.find((m) => m.isDefault);
+  if (!defaultModel) {
+    throw new Error("No default model defined");
+  }
+  return defaultModel;
+}
+function getAvailableModels() {
+  return MODEL_REGISTRY;
+}
+function normalizeModelName(name) {
+  const legacyMap = {
+    "parakeet-tdt-0.6b-v3-onnx": "parakeet-tdt-v3-int8",
+    "parakeet-tdt-0.6b-v2-onnx": "parakeet-tdt-v2-int8"
+  };
+  return legacyMap[name] ?? name;
+}
+var DEFAULT_MODEL = "parakeet-tdt-v3-int8";
+function buildDownloadUrl(repo, file) {
+  return `https://huggingface.co/${repo}/resolve/main/${file}`;
+}
 function listModels() {
   const modelsDir = getModelsDir();
   if (!existsSync2(modelsDir)) {
@@ -405,14 +614,27 @@ function getDirectorySize(dirPath) {
   return size;
 }
 function isModelInstalled(modelName) {
-  const modelPath = getModelPath(modelName);
+  const modelId = normalizeModelName(modelName);
+  const modelPath = getModelPath(modelId);
   const metadataPath = join2(modelPath, "metadata.json");
   if (!existsSync2(modelPath) || !existsSync2(metadataPath)) {
     return false;
   }
-  const hasEncoder = existsSync2(join2(modelPath, "encoder-model.int8.onnx")) || existsSync2(join2(modelPath, "encoder-model.onnx"));
-  const hasDecoder = existsSync2(join2(modelPath, "decoder_joint-model.int8.onnx")) || existsSync2(join2(modelPath, "decoder_joint-model.onnx"));
-  const hasVocab = existsSync2(join2(modelPath, "vocab.txt"));
+  const modelDef = getModelDefinition(modelId);
+  if (modelDef) {
+    for (const file of modelDef.files) {
+      if (file.required) {
+        const filePath = join2(modelPath, file.name);
+        if (!existsSync2(filePath)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+  const hasEncoder = existsSync2(join2(modelPath, "encoder-model.int8.onnx")) || existsSync2(join2(modelPath, "encoder-model.onnx")) || existsSync2(join2(modelPath, "encoder.int8.onnx")) || existsSync2(join2(modelPath, "onnx/encoder_model_int8.onnx"));
+  const hasDecoder = existsSync2(join2(modelPath, "decoder_joint-model.int8.onnx")) || existsSync2(join2(modelPath, "decoder_joint-model.onnx")) || existsSync2(join2(modelPath, "decoder.int8.onnx")) || existsSync2(join2(modelPath, "onnx/decoder_model_int8.onnx")) || existsSync2(join2(modelPath, "onnx/decoder_with_past_model_int8.onnx"));
+  const hasVocab = existsSync2(join2(modelPath, "vocab.txt")) || existsSync2(join2(modelPath, "tokens.txt")) || existsSync2(join2(modelPath, "tokenizer.json"));
   return hasEncoder && hasDecoder && hasVocab;
 }
 function isDefaultModelInstalled() {
@@ -457,46 +679,59 @@ async function downloadFile(url, destPath, onProgress) {
   }
   return downloaded;
 }
-async function downloadModel(modelName = DEFAULT_MODEL, onProgress, variant = "int8") {
-  const modelDir = getModelPath(modelName);
-  if (isModelInstalled(modelName)) {
+async function downloadModel(modelId = DEFAULT_MODEL, onProgress) {
+  const normalizedId = normalizeModelName(modelId);
+  const modelDir = getModelPath(normalizedId);
+  if (isModelInstalled(normalizedId)) {
     return modelDir;
   }
+  const modelDef = getModelDefinition(normalizedId);
+  if (!modelDef) {
+    throw new Error(`Unknown model: ${normalizedId}`);
+  }
   mkdirSync2(modelDir, { recursive: true });
-  const files = MODEL_FILES[variant];
   let totalDownloaded = 0;
   const downloadedFiles = [];
+  const totalFiles = modelDef.files.length;
   try {
-    for (const file of files) {
-      const url = `${MODEL_BASE_URL}/${file}`;
-      const destPath = join2(modelDir, file);
+    for (let i = 0; i < modelDef.files.length; i++) {
+      const file = modelDef.files[i];
+      const url = buildDownloadUrl(modelDef.repo, file.name);
+      const destPath = join2(modelDir, file.name);
+      const pathParts = file.name.split("/").slice(0, -1);
+      if (pathParts.length > 0) {
+        const destDir = join2(modelDir, ...pathParts);
+        if (!existsSync2(destDir)) {
+          mkdirSync2(destDir, { recursive: true });
+        }
+      }
       if (onProgress) {
-        onProgress(0, 0, file);
+        onProgress(0, 0, `[${i + 1}/${totalFiles}] ${file.name}`);
       }
       const fileSize = await downloadFile(url, destPath, (downloaded, total) => {
         if (onProgress) {
-          onProgress(downloaded, total, file);
+          onProgress(downloaded, total, `[${i + 1}/${totalFiles}] ${file.name}`);
         }
       });
       totalDownloaded += fileSize;
-      downloadedFiles.push(file);
+      downloadedFiles.push(file.name);
     }
+    const version = normalizedId.includes("v2") ? "v2" : normalizedId.includes("v3") ? "v3" : "v1";
     const metadata = {
-      name: modelName,
-      version: "v3",
+      name: normalizedId,
+      version,
       checksum: "",
-      // Would compute combined checksum if needed
       downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
       size: totalDownloaded,
-      source: MODEL_REPO,
-      variant,
+      source: modelDef.repo,
+      variant: normalizedId,
       files: downloadedFiles
     };
     writeFileSync2(join2(modelDir, "metadata.json"), JSON.stringify(metadata, null, 2));
     return modelDir;
-  } catch (error2) {
+  } catch (error3) {
     rmSync(modelDir, { recursive: true, force: true });
-    throw error2;
+    throw error3;
   }
 }
 function removeModel(modelName) {
@@ -518,6 +753,15 @@ function cleanModels() {
     }
   }
   return removed;
+}
+function formatBytes(bytes) {
+  if (bytes === 0)
+    return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const k = 1024;
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const unit = units[i] ?? "GB";
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${unit}`;
 }
 
 // ../core/dist/logging.js
@@ -736,14 +980,14 @@ async function downloadTrayApp(version = TRAY_APP_VERSION, onProgress) {
     };
     writeFileSync3(join3(binDir, "tray-metadata.json"), JSON.stringify(metadata, null, 2));
     return trayPath;
-  } catch (error2) {
+  } catch (error3) {
     if (existsSync4(archivePath)) {
       rmSync2(archivePath, { force: true });
     }
     if (existsSync4(bundlePath)) {
       rmSync2(bundlePath, { recursive: true, force: true });
     }
-    throw error2;
+    throw error3;
   }
 }
 
@@ -1349,6 +1593,11 @@ async function settingsCommand(args) {
     keyValue("Model", config.model);
     keyValue("Clipboard cleanup", config.clipboardCleanup ? "enabled" : "disabled");
     keyValue("Recording mode", config.recordingMode === "push_to_talk" ? "push-to-talk" : "toggle");
+    keyValue("VAD (silence filter)", config.vadEnabled ? "enabled" : "disabled");
+    if (config.vadEnabled) {
+      keyValue("  VAD threshold", `${config.vadThreshold}`);
+      keyValue("  VAD min speech", `${config.vadMinSpeechMs}ms`);
+    }
     console.log("");
     console.log(`  ${dim("Path:")} ${configPath}`);
     console.log("");
@@ -1592,46 +1841,103 @@ async function doctorCommand(_args) {
 // src/commands/models.ts
 function showModelsHelp() {
   header("Model Management");
-  console.log(`  ${dim("dybur uses NVIDIA Parakeet for speech recognition.")}`);
-  console.log(`  ${dim("Models are downloaded from HuggingFace on first use.")}`);
+  console.log(`  ${dim("dybur supports multiple STT models with different accuracy/speed tradeoffs.")}`);
+  console.log(`  ${dim("Models are downloaded from HuggingFace.")}`);
   console.log("");
   divider();
   console.log("");
   console.log(`  ${brand.accent("Commands")}`);
-  command("models list", "List installed models");
-  command("models prefetch", "Download default model");
-  command("models clean", "Remove unused models");
+  command("m, m l, m list", "List installed models");
+  command("m list -a", "Show all available models");
+  command("m d, m download", "Download a model (interactive)");
+  command("m s, m set", "Set active model (interactive)");
+  command("m prefetch", "Download default model");
+  command("m clean", "Remove unused models");
   console.log("");
+  console.log(`  ${brand.accent("Examples")}`);
+  console.log(`  ${cyan("dybur m d")}                    ${dim("Interactive model download")}`);
+  console.log(`  ${cyan("dybur m s")}                    ${dim("Interactive model selection")}`);
+  console.log(`  ${cyan("dybur m d whisper-large-v3-turbo-int8")}  ${dim("Download specific model")}`);
+  console.log("");
+  const defaultModel = getDefaultModelDefinition();
   console.log(`  ${brand.accent("Default Model")}`);
-  console.log(`  ${dim("Name:")}   ${DEFAULT_MODEL}`);
-  console.log(`  ${dim("Source:")} huggingface.co/${MODEL_REPO}`);
-  console.log(`  ${dim("Size:")}   ~670 MB (INT8 quantized)`);
+  console.log(`  ${dim("ID:")}     ${defaultModel.id}`);
+  console.log(`  ${dim("Name:")}   ${defaultModel.displayName}`);
+  console.log(`  ${dim("Size:")}   ${formatBytes(defaultModel.sizeBytes)}`);
+  console.log("");
+  console.log(`  ${brand.accent("Available Models")}`);
+  const models = getAvailableModels();
+  for (const m of models) {
+    const badge = m.isDefault ? ` ${green("[default]")}` : "";
+    console.log(`  ${dim(icons.bullet)} ${m.id}${badge} - ${formatBytes(m.sizeBytes)}`);
+  }
   console.log("");
 }
-async function listCommand() {
+async function listCommand(showAvailable = false) {
+  const modelsDir = getModelsDir();
+  const config = loadConfig();
+  const activeModelId = config.model ?? DEFAULT_MODEL;
+  if (showAvailable) {
+    header("Available Models");
+    const availableModels = getAvailableModels();
+    for (const model of availableModels) {
+      const installed = isModelInstalled(model.id);
+      const isActive = model.id === activeModelId;
+      const badges = [];
+      if (model.isDefault) badges.push(green("[default]"));
+      if (installed) badges.push(green("[installed]"));
+      if (isActive && installed) badges.push(cyan("[active]"));
+      const badgeStr = badges.length > 0 ? ` ${badges.join(" ")}` : "";
+      const size = formatBytes(model.sizeBytes);
+      console.log(`  ${brand.accent(icons.bullet)} ${model.id}${badgeStr}`);
+      console.log(`    ${dim("Name:")} ${model.displayName}`);
+      console.log(`    ${dim("Description:")} ${model.description}`);
+      console.log(`    ${dim("Size:")} ${size}`);
+      console.log(`    ${dim("Architecture:")} ${model.architecture}`);
+      if (model.languages.length > 0) {
+        console.log(`    ${dim("Languages:")} ${model.languages.join(", ")}`);
+      } else {
+        console.log(`    ${dim("Languages:")} All (99+)`);
+      }
+      console.log("");
+    }
+    divider();
+    console.log("");
+    console.log(`  ${dim("To download a model:")} ${cyan("dybur models download <model-id>")}`);
+    console.log(`  ${dim("To set active model:")} ${cyan("dybur models set <model-id>")}`);
+    console.log("");
+    return;
+  }
   header("Installed Models");
   const models = listModels();
-  const modelsDir = getModelsDir();
   if (models.length === 0) {
     info("No models installed");
     console.log("");
     console.log(`  ${dim("To install the default model:")}`);
     console.log(`  ${cyan("dybur models prefetch")}`);
     console.log("");
+    console.log(`  ${dim("To see all available models:")}`);
+    console.log(`  ${cyan("dybur models list --available")}`);
+    console.log("");
     console.log(`  ${dim("Models directory:")} ${formatPath(modelsDir, 45)}`);
     console.log("");
     return;
   }
   for (const model of models) {
-    const defaultBadge = model.isDefault ? ` ${green("[default]")}` : "";
+    const isActive = model.name === activeModelId;
+    const badges = [];
+    if (model.isDefault) badges.push(green("[default]"));
+    if (isActive) badges.push(cyan("[active]"));
+    const badgeStr = badges.length > 0 ? ` ${badges.join(" ")}` : "";
     const size = formatSize(model.size);
-    console.log(`  ${brand.accent(icons.bullet)} ${model.name}${defaultBadge}`);
+    const modelDef = getModelDefinition(model.name);
+    console.log(`  ${brand.accent(icons.bullet)} ${model.name}${badgeStr}`);
+    if (modelDef) {
+      console.log(`    ${dim("Name:")} ${modelDef.displayName}`);
+    }
     console.log(`    ${dim("Size:")} ${size}`);
     if (model.metadata) {
       console.log(`    ${dim("Downloaded:")} ${model.metadata.downloadedAt.split("T")[0]}`);
-      if (model.metadata.variant) {
-        console.log(`    ${dim("Variant:")} ${model.metadata.variant}`);
-      }
       if (model.metadata.source) {
         console.log(`    ${dim("Source:")} ${model.metadata.source}`);
       }
@@ -1640,33 +1946,96 @@ async function listCommand() {
   }
   divider();
   console.log("");
+  console.log(`  ${dim("Active model:")} ${activeModelId}`);
   console.log(`  ${dim("Models directory:")} ${formatPath(modelsDir, 45)}`);
   console.log("");
 }
-async function prefetchCommand() {
+async function selectModelForDownload() {
+  const availableModels = getAvailableModels();
+  const config = loadConfig();
+  const activeModelId = config.model ?? DEFAULT_MODEL;
+  const notInstalled = availableModels.filter((m) => !isModelInstalled(m.id));
+  const installed = availableModels.filter((m) => isModelInstalled(m.id));
+  if (notInstalled.length === 0) {
+    info("All models are already installed");
+    console.log("");
+    return void 0;
+  }
+  const choices = [
+    ...notInstalled.map((model) => ({
+      label: `${model.displayName} (${formatBytes(model.sizeBytes)})`,
+      value: model.id,
+      hint: model.description
+    })),
+    // Add separator if there are installed models
+    ...installed.length > 0 ? [
+      {
+        label: dim("\u2500\u2500\u2500 Already Installed \u2500\u2500\u2500"),
+        value: "__separator__",
+        hint: ""
+      },
+      ...installed.map((model) => ({
+        label: `${model.displayName} (${formatBytes(model.sizeBytes)})`,
+        value: model.id,
+        hint: model.id === activeModelId ? `${green("[installed]")} ${cyan("[active]")}` : green("[installed]")
+      }))
+    ] : []
+  ];
+  const selected = await select({
+    message: "Select model to download",
+    choices,
+    initial: 0
+  });
+  if (selected === void 0 || selected === "__separator__") {
+    return void 0;
+  }
+  return selected;
+}
+async function downloadCommand(modelId) {
   header("Download Model");
-  if (isDefaultModelInstalled()) {
-    success(`Model already installed: ${DEFAULT_MODEL}`);
+  if (!modelId) {
+    const selectedId = await selectModelForDownload();
+    if (!selectedId) {
+      info("Download cancelled");
+      console.log("");
+      return;
+    }
+    modelId = selectedId;
+  }
+  const modelDef = getModelDefinition(modelId);
+  if (!modelDef) {
+    error(`Unknown model: ${modelId}`);
+    console.log("");
+    console.log(`  ${dim("Available models:")}`);
+    for (const m of getAvailableModels()) {
+      console.log(`  ${dim(icons.bullet)} ${m.id}`);
+    }
+    console.log("");
+    process.exit(1);
+  }
+  if (isModelInstalled(modelId)) {
+    success(`Model already installed: ${modelId}`);
+    console.log("");
+    console.log(`  ${dim("To set as active:")} ${cyan(`dybur models set ${modelId}`)}`);
     console.log("");
     return;
   }
-  console.log(`  ${dim("Model:")}  ${DEFAULT_MODEL}`);
-  console.log(`  ${dim("Source:")} huggingface.co/${MODEL_REPO}`);
-  console.log(`  ${dim("Variant:")} INT8 quantized (~670 MB)`);
+  console.log(`  ${dim("Model:")}  ${modelDef.displayName}`);
+  console.log(`  ${dim("ID:")}     ${modelDef.id}`);
+  console.log(`  ${dim("Size:")}   ${formatBytes(modelDef.sizeBytes)}`);
+  console.log(`  ${dim("Source:")} huggingface.co/${modelDef.repo}`);
   console.log("");
   divider();
   console.log("");
   let currentFile = "";
-  let fileCount = 0;
   try {
-    await downloadModel(DEFAULT_MODEL, (downloaded, total, file) => {
+    await downloadModel(modelId, (downloaded, total, file) => {
       if (file && file !== currentFile) {
         if (currentFile) {
           process.stdout.write("\n");
         }
         currentFile = file;
-        fileCount++;
-        console.log(`  ${dim(`[${fileCount}/4]`)} ${file}`);
+        console.log(`  ${file}`);
       }
       if (total > 0) {
         const bar = progressBar(downloaded, total, 25);
@@ -1676,9 +2045,9 @@ async function prefetchCommand() {
     console.log("\n");
     divider();
     console.log("");
-    success("Model downloaded successfully");
+    success(`Model downloaded successfully: ${modelId}`);
     console.log("");
-    info(`Run ${cyan("dybur start")} to begin`);
+    console.log(`  ${dim("To set as active:")} ${cyan(`dybur models set ${modelId}`)}`);
     console.log("");
   } catch (err) {
     console.log("\n");
@@ -1688,6 +2057,84 @@ async function prefetchCommand() {
     console.log("");
     process.exit(1);
   }
+}
+async function prefetchCommand() {
+  await downloadCommand(DEFAULT_MODEL);
+}
+async function selectModelForSet() {
+  const installedModels = listModels();
+  const config = loadConfig();
+  const activeModelId = config.model ?? DEFAULT_MODEL;
+  if (installedModels.length === 0) {
+    error("No models installed");
+    console.log("");
+    console.log(`  ${dim("To download a model:")}`);
+    console.log(`  ${cyan("dybur models download")}`);
+    console.log("");
+    return void 0;
+  }
+  const choices = installedModels.map((model) => {
+    const modelDef = getModelDefinition(model.name);
+    const isActive = model.name === activeModelId;
+    return {
+      label: modelDef?.displayName ?? model.name,
+      value: model.name,
+      hint: isActive ? cyan("[active]") : modelDef?.description ?? ""
+    };
+  });
+  const currentIndex = choices.findIndex((c2) => c2.value === activeModelId);
+  const selected = await select({
+    message: "Select active model",
+    choices,
+    initial: currentIndex >= 0 ? currentIndex : 0
+  });
+  return selected;
+}
+async function setCommand(modelId) {
+  header("Set Active Model");
+  if (!modelId) {
+    const selectedId = await selectModelForSet();
+    if (!selectedId) {
+      info("Selection cancelled");
+      console.log("");
+      return;
+    }
+    modelId = selectedId;
+  }
+  const modelDef = getModelDefinition(modelId);
+  if (!modelDef) {
+    error(`Unknown model: ${modelId}`);
+    console.log("");
+    console.log(`  ${dim("Available models:")}`);
+    for (const m of getAvailableModels()) {
+      console.log(`  ${dim(icons.bullet)} ${m.id}`);
+    }
+    console.log("");
+    process.exit(1);
+  }
+  if (!isModelInstalled(modelId)) {
+    error(`Model not installed: ${modelId}`);
+    console.log("");
+    console.log(`  ${dim("To download this model:")}`);
+    console.log(`  ${cyan(`dybur models download ${modelId}`)}`);
+    console.log("");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const oldModelId = config.model ?? DEFAULT_MODEL;
+  if (oldModelId === modelId) {
+    info(`Model already active: ${modelId}`);
+    console.log("");
+    return;
+  }
+  updateConfig({ model: modelId });
+  success(`Active model changed: ${oldModelId} -> ${modelId}`);
+  console.log("");
+  console.log(`  ${dim("Name:")} ${modelDef.displayName}`);
+  console.log(`  ${dim("Architecture:")} ${modelDef.architecture}`);
+  console.log("");
+  info(`Restart dybur for changes to take effect`);
+  console.log("");
 }
 async function cleanCommand() {
   header("Clean Models");
@@ -1711,10 +2158,21 @@ async function modelsCommand(args) {
   const subcommand = args[0];
   switch (subcommand) {
     case "list":
-      await listCommand();
+    case "l":
+      const showAvailable = args.includes("--available") || args.includes("-a");
+      await listCommand(showAvailable);
+      break;
+    case "download":
+    case "d":
+      const downloadModelId = args[1];
+      await downloadCommand(downloadModelId);
+      break;
+    case "set":
+    case "s":
+      const setModelId = args[1];
+      await setCommand(setModelId);
       break;
     case "prefetch":
-    case "download":
       await prefetchCommand();
       break;
     case "clean":
@@ -1898,7 +2356,7 @@ async function listCommand2() {
   console.log(`    ${cyan("dybur stop && dybur start")}`);
   console.log("");
 }
-async function setCommand(deviceName) {
+async function setCommand2(deviceName) {
   header("Set Input Device");
   if (!deviceName || deviceName.trim().length === 0) {
     error("Device name is required");
@@ -1948,7 +2406,7 @@ async function devicesCommand(args) {
     case "set":
     case "s":
       const deviceName = args.slice(1).join(" ");
-      await setCommand(deviceName);
+      await setCommand2(deviceName);
       break;
     case "reset":
     case "default":
@@ -1969,9 +2427,118 @@ async function devicesCommand(args) {
   }
 }
 
+// src/commands/vad.ts
+async function vadCommand(args) {
+  const config = loadConfig();
+  const subcommand = args[0]?.toLowerCase();
+  if (subcommand === "on" || subcommand === "enable") {
+    config.vadEnabled = true;
+    saveConfig(config);
+    success("VAD enabled");
+    info("Silence will be filtered before transcription");
+    return;
+  }
+  if (subcommand === "off" || subcommand === "disable") {
+    config.vadEnabled = false;
+    saveConfig(config);
+    success("VAD disabled");
+    info("All audio will be sent to transcription");
+    return;
+  }
+  if (subcommand === "status") {
+    showStatus(config);
+    return;
+  }
+  if (!subcommand) {
+    config.vadEnabled = !config.vadEnabled;
+    saveConfig(config);
+    const status = config.vadEnabled ? "enabled" : "disabled";
+    success(`VAD ${status}`);
+    return;
+  }
+  showHelp();
+}
+function showStatus(config) {
+  header("Voice Activity Detection");
+  keyValue("Status", config.vadEnabled ? brand.accent("enabled") : dim("disabled"));
+  keyValue("Threshold", `${config.vadThreshold}`);
+  keyValue("Min speech duration", `${config.vadMinSpeechMs}ms`);
+  console.log("");
+  console.log(`  ${dim("VAD filters silence and noise before transcription.")}`);
+  console.log(`  ${dim("This improves accuracy and reduces processing time.")}`);
+  console.log("");
+}
+function showHelp() {
+  header("VAD Commands");
+  console.log(`  ${brand.accent("dybur vad")}          Toggle VAD on/off`);
+  console.log(`  ${brand.accent("dybur vad on")}       Enable VAD`);
+  console.log(`  ${brand.accent("dybur vad off")}      Disable VAD`);
+  console.log(`  ${brand.accent("dybur vad status")}   Show VAD settings`);
+  console.log("");
+  info("VAD (Voice Activity Detection) filters silence before transcription");
+  console.log("");
+}
+
+// src/commands/gpu.ts
+async function gpuCommand(args) {
+  const config = loadConfig();
+  const subcommand = args[0]?.toLowerCase();
+  if (subcommand === "on" || subcommand === "auto" || subcommand === "enable") {
+    config.gpuMode = "auto";
+    saveConfig(config);
+    success("GPU acceleration enabled (auto-detect)");
+    info("Will use DirectML (Windows) or CoreML (macOS) if available");
+    return;
+  }
+  if (subcommand === "off" || subcommand === "cpu" || subcommand === "disable") {
+    config.gpuMode = "cpu";
+    saveConfig(config);
+    success("GPU acceleration disabled (CPU-only mode)");
+    info("All inference will run on CPU");
+    return;
+  }
+  if (subcommand === "status") {
+    showStatus2(config);
+    return;
+  }
+  if (!subcommand) {
+    config.gpuMode = config.gpuMode === "auto" ? "cpu" : "auto";
+    saveConfig(config);
+    const status = config.gpuMode === "auto" ? "enabled (auto)" : "disabled (CPU-only)";
+    success(`GPU acceleration ${status}`);
+    return;
+  }
+  showHelp2();
+}
+function showStatus2(config) {
+  header("GPU Acceleration");
+  const isAuto = config.gpuMode === "auto";
+  keyValue("Mode", isAuto ? brand.accent("auto (GPU if available)") : dim("cpu (GPU disabled)"));
+  console.log("");
+  console.log(`  ${dim("Platform-specific GPU providers:")}`);
+  console.log(`  ${dim("  Windows: DirectML (works with AMD, Intel, NVIDIA)")}`);
+  console.log(`  ${dim("  macOS:   CoreML (Apple Silicon / Intel)")}`);
+  console.log("");
+  console.log(`  ${dim("GPU acceleration speeds up speech recognition.")}`);
+  console.log(`  ${dim("If GPU fails, the app will automatically fall back to CPU.")}`);
+  console.log("");
+  info("Note: Restart the app for GPU mode changes to take effect");
+  console.log("");
+}
+function showHelp2() {
+  header("GPU Commands");
+  console.log(`  ${brand.accent("dybur gpu")}          Toggle GPU mode`);
+  console.log(`  ${brand.accent("dybur gpu on")}       Enable GPU (auto-detect)`);
+  console.log(`  ${brand.accent("dybur gpu off")}      Disable GPU (CPU-only)`);
+  console.log(`  ${brand.accent("dybur gpu status")}   Show GPU settings`);
+  console.log("");
+  info("GPU acceleration uses DirectML (Windows) or CoreML (macOS)");
+  console.log("");
+}
+
 // src/cli.ts
 var VERSION = "1.0.0";
-function showHelp() {
+function showHelp3() {
   banner();
   console.log(`  ${dim("Local voice dictation for macOS & Windows")}`);
   console.log(`  ${dim("Powered by")} ${cyan("NVIDIA Parakeet")} ${dim("- 100% offline")}`);
@@ -1984,6 +2551,8 @@ function showHelp() {
   command("doctor, diag", "Run diagnostics");
   command("models, m", "Manage speech models");
   command("devices, d", "Manage input devices");
+  command("vad", "Toggle Voice Activity Detection");
+  command("gpu", "Toggle GPU acceleration");
   console.log("");
   header("Model Commands");
   command("models list", "List installed models");
@@ -2032,7 +2601,7 @@ async function main() {
     return;
   }
   if (values.help || positionals.length === 0) {
-    showHelp();
+    showHelp3();
     return;
   }
   const cmd = positionals[0];
@@ -2064,6 +2633,12 @@ async function main() {
       case "devices":
       case "d":
         await devicesCommand(commandArgs);
+        break;
+      case "vad":
+        await vadCommand(commandArgs);
+        break;
+      case "gpu":
+        await gpuCommand(commandArgs);
         break;
       default:
         error(`Unknown command: ${cmd}`);

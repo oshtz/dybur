@@ -7,7 +7,7 @@ Fast, local, private voice dictation for macOS and Windows.
 
 ## Features
 
-- **100% Local** - Speech recognition runs entirely on your device using [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+- **100% Local** - Speech recognition runs entirely on your device using state-of-the-art ONNX models
 - **Universal** - Inject text into any application via hotkey
 - **Private** - No cloud, no accounts, no telemetry
 - **Fast** - Sub-second transcription latency
@@ -76,7 +76,7 @@ Config file location:
   "autoPunctuation": true,
   "sentenceCase": true,
   "silenceTimeoutMs": 1000,
-  "model": "parakeet-tdt-0.6b-v3-onnx",
+  "model": "parakeet-tdt-v3-int8",
   "clipboardCleanup": true,
   "recordingMode": "toggle",
   "vadEnabled": true,
@@ -98,12 +98,31 @@ Config file location:
 | `vadThreshold` | `0.0`-`1.0` | VAD sensitivity (higher = stricter) |
 | `vadMinSpeechMs` | Number | Minimum speech duration to keep (ms) |
 
+## Models
+
+dybur supports multiple speech recognition models. You can switch models from the tray menu or via CLI:
+
+```sh
+dybur models list      # List available models
+dybur models switch    # Select a model interactively
+```
+
+| Model | Size | Languages | Description |
+|-------|------|-----------|-------------|
+| `parakeet-tdt-v3-int8` | ~670 MB | 25 | **Default.** Multilingual transducer, balanced accuracy |
+| `parakeet-tdt-v2-int8` | ~660 MB | English | Fast English-only transducer |
+| `nemotron-streaming-int8` | ~660 MB | English | Low-latency streaming transducer |
+| `whisper-large-v3-turbo-int8` | ~1.1 GB | 99 | OpenAI Whisper, broad language support |
+| `whisper-large-v3-turbo-fp16` | ~1.6 GB | 99 | Whisper FP16, higher accuracy |
+
+Models are downloaded automatically on first use.
+
 ## Requirements
 
 - **macOS:** 10.15+ (Catalina or later)
 - **Windows:** 10/11
 - **Microphone:** Required for dictation
-- **Disk:** ~700 MB for speech model (INT8 quantized)
+- **Disk:** ~700 MB - 1.6 GB depending on speech model
 
 ### macOS Permissions
 

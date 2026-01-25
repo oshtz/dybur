@@ -10,7 +10,7 @@ import { pipeline } from 'stream/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 
-const DEFAULT_MODEL = 'parakeet-tdt-0.6b-v3';
+const DEFAULT_MODEL = 'parakeet-tdt-v3-int8';
 const MODEL_BASE_URL = 'https://github.com/oshtz/dybur/releases/download/v1.0.0';
 
 function getModelsDir() {

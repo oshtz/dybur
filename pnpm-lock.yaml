@@ -29,6 +29,9 @@ importers:
 
   apps/tray:
     dependencies:
+      '@dybur/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
       '@tauri-apps/api':
         specifier: ^2.0.0
         version: 2.9.1

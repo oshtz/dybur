@@ -17,6 +17,7 @@ mod privacy;
 mod single_instance;
 mod state;
 mod stt;
+mod tokenizer;
 mod vad;
 
 use std::sync::Mutex;
@@ -32,7 +33,10 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use audio::{AudioCapture, get_audio_error_help, list_input_devices};
 use config::{get_config_path, save_config};
 use injection::inject_text;
-use models::{list_models, is_default_model_installed, format_bytes, DEFAULT_MODEL, is_download_in_progress, get_download_status};
+use models::{
+    format_bytes, is_download_in_progress, get_download_status, is_model_installed,
+    get_available_models, get_model_definition, normalize_model_name,
+};
 use state::{AppState, RecordingState};
 use stt::{SttEngine, get_model_paths};
 
@@ -314,7 +318,15 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
 fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "models", "Models");
 
+    // Get current selected model from config
+    let current_model = {
+        let state = app.state::<Mutex<AppState>>();
+        let state_guard = state.inner().lock().unwrap();
+        normalize_model_name(&state_guard.config.model).to_string()
+    };
+
     // Check for download in progress first
+    let download_in_progress = is_download_in_progress();
     if let Some(status) = get_download_status() {
         let status_item = MenuItemBuilder::with_id("download_status", &status)
             .enabled(false)
@@ -323,41 +335,39 @@ fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<t
         submenu = submenu.separator();
     }
 
-    // List installed models
-    let installed_models = list_models();
+    // List all available models from registry
+    let available_models = get_available_models();
 
-    if installed_models.is_empty() {
-        let no_models = MenuItemBuilder::with_id("no_models", "No models installed")
-            .enabled(false)
+    for model_def in available_models {
+        let is_installed = is_model_installed(model_def.id);
+        let is_selected = current_model == model_def.id;
+        let size_str = format_bytes(model_def.size_bytes);
+
+        // Show selection indicator and install status
+        let prefix = if is_selected { "● " } else { "  " };
+        let suffix = if is_installed { "" } else { " [Not installed]" };
+
+        let label = format!("{}{} ({}){}", prefix, model_def.display_name, size_str, suffix);
+
+        // Can select if installed and not currently downloading
+        // Can trigger download if not installed
+        let enabled = if is_installed {
+            !download_in_progress // Can select installed models when not downloading
+        } else {
+            !download_in_progress // Can download when not already downloading
+        };
+
+        let item = MenuItemBuilder::with_id(format!("model_select_{}", model_def.id), label)
+            .enabled(enabled)
             .build(app)?;
-        submenu = submenu.item(&no_models);
-    } else {
-        for model in &installed_models {
-            let check_mark = if model.is_default { "✓ " } else { "  " };
-            let size_str = format_bytes(model.size);
-            let label = format!("{}{} ({})", check_mark, model.name, size_str);
-            let item = MenuItemBuilder::with_id(format!("model_{}", model.name), label)
-                .enabled(false)
-                .build(app)?;
-            submenu = submenu.item(&item);
-        }
+        submenu = submenu.item(&item);
     }
 
     submenu = submenu.separator();
 
-    // Disable download button if download already in progress
-    let download_in_progress = is_download_in_progress();
-    let download_label = if download_in_progress {
-        "Downloading..."
-    } else {
-        "Download Model..."
-    };
-    let download_model = MenuItemBuilder::with_id("download_model", download_label)
-        .enabled(!download_in_progress)
-        .build(app)?;
-    let clean_models = MenuItemBuilder::with_id("clean_models", "Clean Unused").build(app)?;
-
-    submenu = submenu.item(&download_model).item(&clean_models);
+    // Clean unused models button
+    let clean_models = MenuItemBuilder::with_id("clean_models", "Remove Unused Models").build(app)?;
+    submenu = submenu.item(&clean_models);
 
     submenu.build()
 }
@@ -531,11 +541,12 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         "install_cli" => {
             install_cli_to_path(app);
         }
-        "download_model" => {
-            spawn_model_download(app);
-        }
         "clean_models" => {
             clean_unused_models(app);
+        }
+        id if id.starts_with("model_select_") => {
+            let model_id = id.strip_prefix("model_select_").unwrap();
+            handle_model_selection(app, model_id);
         }
         "device_default" => {
             select_device(app, None);
@@ -1184,94 +1195,6 @@ fn reregister_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str)
     Ok(())
 }
 
-/// Spawn model download in background
-fn spawn_model_download(app: &tauri::AppHandle) {
-    if is_default_model_installed() {
-        log_info!("models", "Default model already installed");
-        #[cfg(target_os = "windows")]
-        show_windows_notification("Model Status", "Default model is already installed.");
-        #[cfg(target_os = "macos")]
-        show_macos_notification("Model Status", "Default model is already installed.");
-        return;
-    }
-
-    if is_download_in_progress() {
-        log_info!("models", "Download already in progress");
-        return;
-    }
-
-    log_info!("models", "Starting model download...");
-    #[cfg(target_os = "windows")]
-    show_windows_notification("Model Download", "Downloading model... This may take a few minutes.");
-    #[cfg(target_os = "macos")]
-    show_macos_notification("Model Download", "Downloading model... This may take a few minutes.");
-
-    // Rebuild menu immediately to show "Downloading..." status
-    rebuild_tray_menu(app);
-
-    // Start menu refresh thread (updates every 2 seconds during download)
-    let app_handle_refresh = app.clone();
-    std::thread::spawn(move || {
-        while is_download_in_progress() {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            rebuild_tray_menu(&app_handle_refresh);
-        }
-    });
-
-    // Start download thread
-    let app_handle = app.clone();
-    std::thread::spawn(move || {
-        match models::download_model_sync(DEFAULT_MODEL, "int8") {
-            Ok(path) => {
-                log_info!("models", "Model downloaded to: {}", path.display());
-                #[cfg(target_os = "windows")]
-                show_windows_notification("Model Download", "Model downloaded successfully! Restart dybur to use it.");
-                #[cfg(target_os = "macos")]
-                show_macos_notification("Model Download", "Model downloaded successfully! Restart dybur to use it.");
-
-                // Rebuild menu to show the new model
-                rebuild_tray_menu(&app_handle);
-
-                // Also try to load the model so user doesn't need to restart
-                let state = app_handle.state::<Mutex<AppState>>();
-                let (model_name, gpu_preference) = {
-                    let state_guard = state.inner().lock().unwrap();
-                    (
-                        state_guard.config.model.clone(),
-                        execution_providers::parse_gpu_preference(&state_guard.config.gpu_mode),
-                    )
-                };
-
-                if let Some(stt_config) = get_model_paths(&model_name) {
-                    let mut engine = STT_ENGINE.lock().unwrap();
-                    match engine.load(stt_config, gpu_preference) {
-                        Ok(()) => {
-                            log_info!("model", "STT model '{}' loaded and ready", model_name);
-                            #[cfg(target_os = "windows")]
-                            show_windows_notification("Model Ready", "Speech model is now ready to use!");
-                            #[cfg(target_os = "macos")]
-                            show_macos_notification("Model Ready", "Speech model is now ready to use!");
-                        }
-                        Err(e) => {
-                            log_error!("model", "Failed to load STT model after download: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log_error!("models", "Model download failed: {}", e);
-                #[cfg(target_os = "windows")]
-                show_windows_notification("Model Download Failed", &format!("Error: {}", e));
-                #[cfg(target_os = "macos")]
-                show_macos_notification("Model Download Failed", &format!("Error: {}", e));
-
-                // Rebuild menu to show error state
-                rebuild_tray_menu(&app_handle);
-            }
-        }
-    });
-}
-
 /// Clean unused models
 fn clean_unused_models(app: &tauri::AppHandle) {
     let removed = models::clean_models();
@@ -1292,6 +1215,145 @@ fn clean_unused_models(app: &tauri::AppHandle) {
         // Rebuild menu to reflect changes
         rebuild_tray_menu(app);
     }
+}
+
+/// Handle model selection from the menu
+fn handle_model_selection(app: &tauri::AppHandle, model_id: &str) {
+    // Check if model exists in registry
+    let model_def = match get_model_definition(model_id) {
+        Some(def) => def,
+        None => {
+            log_error!("models", "Unknown model ID: {}", model_id);
+            return;
+        }
+    };
+
+    // Check if model is installed
+    if is_model_installed(model_id) {
+        // Model is installed - switch to it
+        switch_to_model(app, model_id);
+    } else {
+        // Model needs to be downloaded first
+        log_info!("models", "Model '{}' not installed, starting download...", model_id);
+        spawn_model_download_by_id(app, model_id, model_def.display_name);
+    }
+}
+
+/// Switch to a different model (assumes model is already installed)
+fn switch_to_model(app: &tauri::AppHandle, model_id: &str) {
+    log_info!("models", "Switching to model: {}", model_id);
+
+    // Update config
+    {
+        let state = app.state::<Mutex<AppState>>();
+        let mut state_guard = state.inner().lock().unwrap();
+        state_guard.config.model = model_id.to_string();
+
+        // Save config
+        if let Err(e) = save_config(&state_guard.config) {
+            log_error!("config", "Failed to save config: {}", e);
+        }
+    }
+
+    // Load the new model
+    let state = app.state::<Mutex<AppState>>();
+    let gpu_preference = {
+        let state_guard = state.inner().lock().unwrap();
+        execution_providers::parse_gpu_preference(&state_guard.config.gpu_mode)
+    };
+
+    if let Some(stt_config) = get_model_paths(model_id) {
+        let mut engine = STT_ENGINE.lock().unwrap();
+
+        // Unload current model first
+        engine.unload();
+
+        match engine.load(stt_config, gpu_preference) {
+            Ok(()) => {
+                log_info!("model", "Switched to model '{}' successfully", model_id);
+                #[cfg(target_os = "windows")]
+                show_windows_notification("Model Switched", &format!("Now using: {}", model_id));
+                #[cfg(target_os = "macos")]
+                show_macos_notification("Model Switched", &format!("Now using: {}", model_id));
+            }
+            Err(e) => {
+                log_error!("model", "Failed to load model '{}': {}", model_id, e);
+                #[cfg(target_os = "windows")]
+                show_windows_notification("Model Error", &format!("Failed to load model: {}", e));
+                #[cfg(target_os = "macos")]
+                show_macos_notification("Model Error", &format!("Failed to load model: {}", e));
+            }
+        }
+    } else {
+        log_error!("model", "Model '{}' not supported or files missing", model_id);
+        #[cfg(target_os = "windows")]
+        show_windows_notification("Model Error", "Model not supported or files missing");
+        #[cfg(target_os = "macos")]
+        show_macos_notification("Model Error", "Model not supported or files missing");
+    }
+
+    // Rebuild menu to show new selection
+    rebuild_tray_menu(app);
+}
+
+/// Download a specific model by ID
+fn spawn_model_download_by_id(app: &tauri::AppHandle, model_id: &str, display_name: &str) {
+    if is_download_in_progress() {
+        log_info!("models", "Download already in progress");
+        return;
+    }
+
+    log_info!("models", "Starting download of model: {}", model_id);
+    #[cfg(target_os = "windows")]
+    show_windows_notification("Model Download", &format!("Downloading {}... This may take a few minutes.", display_name));
+    #[cfg(target_os = "macos")]
+    show_macos_notification("Model Download", &format!("Downloading {}... This may take a few minutes.", display_name));
+
+    // Rebuild menu immediately to show "Downloading..." status
+    rebuild_tray_menu(app);
+
+    // Start menu refresh thread (updates every 500ms during download for smooth progress)
+    let app_handle_refresh = app.clone();
+    std::thread::spawn(move || {
+        while is_download_in_progress() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            rebuild_tray_menu(&app_handle_refresh);
+        }
+        // One final refresh after download completes
+        rebuild_tray_menu(&app_handle_refresh);
+    });
+
+    // Start download thread
+    let app_handle = app.clone();
+    let model_id_owned = model_id.to_string();
+    let display_name_owned = display_name.to_string();
+    std::thread::spawn(move || {
+        match models::download_model_sync(&model_id_owned, "int8") {
+            Ok(path) => {
+                log_info!("models", "Model downloaded to: {}", path.display());
+                #[cfg(target_os = "windows")]
+                show_windows_notification("Model Download", &format!("{} downloaded successfully!", display_name_owned));
+                #[cfg(target_os = "macos")]
+                show_macos_notification("Model Download", &format!("{} downloaded successfully!", display_name_owned));
+
+                // Rebuild menu to show the new model
+                rebuild_tray_menu(&app_handle);
+
+                // Automatically switch to the downloaded model
+                switch_to_model(&app_handle, &model_id_owned);
+            }
+            Err(e) => {
+                log_error!("models", "Model download failed: {}", e);
+                #[cfg(target_os = "windows")]
+                show_windows_notification("Model Download Failed", &format!("Error: {}", e));
+                #[cfg(target_os = "macos")]
+                show_macos_notification("Model Download Failed", &format!("Error: {}", e));
+
+                // Rebuild menu to show error state
+                rebuild_tray_menu(&app_handle);
+            }
+        }
+    });
 }
 
 /// Rebuild the tray menu (used after settings changes)
