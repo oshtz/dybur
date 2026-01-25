@@ -52,6 +52,11 @@ lazy_static::lazy_static! {
     static ref RECORDING_BUFFER: Mutex<Option<std::sync::Arc<std::sync::Mutex<Vec<f32>>>>> = Mutex::new(None);
 }
 
+// Global sample rate for the recording buffer (needed for resampling)
+lazy_static::lazy_static! {
+    static ref RECORDING_SAMPLE_RATE: Mutex<u32> = Mutex::new(16000);
+}
+
 // Global STT engine (wrapped in Mutex for thread safety)
 lazy_static::lazy_static! {
     static ref STT_ENGINE: Mutex<SttEngine> = Mutex::new(SttEngine::new());
@@ -1433,12 +1438,15 @@ fn start_recording(app: &tauri::AppHandle) {
                 update_tray_status(app, "Error: Recording failed");
                 return;
             }
-            // Store buffer Arc globally for cross-thread access
+            // Store buffer Arc and sample rate globally for cross-thread access
             {
                 let buffer_arc = capture.get_buffer_arc();
+                let sample_rate = capture.get_sample_rate();
                 let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
                 *global_buffer = Some(buffer_arc);
-                log_info!("audio", "Recording buffer stored globally");
+                let mut global_sample_rate = RECORDING_SAMPLE_RATE.lock().unwrap();
+                *global_sample_rate = sample_rate;
+                log_info!("audio", "Recording buffer stored globally (sample_rate: {}Hz)", sample_rate);
             }
 
             // Store AudioCapture in thread-local to keep stream alive
@@ -1495,12 +1503,23 @@ fn stop_recording(app: &tauri::AppHandle) {
     // Retrieve audio data from global buffer (works across threads)
     let audio_data: Option<Vec<f32>> = {
         let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
+        let sample_rate = *RECORDING_SAMPLE_RATE.lock().unwrap();
         if let Some(buffer_arc) = global_buffer.take() {
             let mut buffer = buffer_arc.lock().unwrap();
             let data = std::mem::take(&mut *buffer);
-            let duration = data.len() as f32 / 16000.0;
-            log_info!("audio", "Retrieved {:.2}s of audio from global buffer", duration);
-            Some(data)
+            let duration = data.len() as f32 / sample_rate as f32;
+            log_info!("audio", "Retrieved {:.2}s of audio from global buffer ({}Hz)", duration, sample_rate);
+
+            // Resample to 16kHz if needed (VAD and STT expect 16kHz)
+            const TARGET_SAMPLE_RATE: u32 = 16000;
+            if sample_rate != TARGET_SAMPLE_RATE {
+                log_info!("audio", "Resampling audio from {}Hz to {}Hz", sample_rate, TARGET_SAMPLE_RATE);
+                let resampled = audio::resample_linear(&data, sample_rate, TARGET_SAMPLE_RATE);
+                log_info!("audio", "Resampled {} -> {} samples", data.len(), resampled.len());
+                Some(resampled)
+            } else {
+                Some(data)
+            }
         } else {
             log_warn!("audio", "No recording buffer found!");
             None
@@ -1660,6 +1679,9 @@ fn toggle_recording(app: &tauri::AppHandle) {
 fn start_streaming_inference(app: &tauri::AppHandle) {
     use crate::models::ModelArchitecture;
 
+    // Get the sample rate for streaming
+    let sample_rate = *RECORDING_SAMPLE_RATE.lock().unwrap();
+
     // Check if model supports streaming
     let streaming_state = {
         let mut engine = STT_ENGINE.lock().unwrap();
@@ -1668,8 +1690,8 @@ fn start_streaming_inference(app: &tauri::AppHandle) {
             return;
         }
 
-        // Initialize streaming state
-        match streaming::StreamingState::from_engine(&mut engine) {
+        // Initialize streaming state with sample rate for proper resampling
+        match streaming::StreamingState::from_engine(&mut engine, sample_rate) {
             Some(state) => state,
             None => {
                 log_warn!("streaming", "Failed to initialize streaming state");

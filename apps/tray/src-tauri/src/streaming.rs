@@ -7,6 +7,7 @@ use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
 use ort::value::TensorRef;
 use std::sync::{Arc, Mutex};
 
+use crate::audio::resample_linear;
 use crate::stt::{SttEngine, SttError, StreamingMetadata};
 
 /// Audio processing constants (must match stt.rs)
@@ -37,8 +38,10 @@ pub struct StreamingState {
     pub tokens: Vec<i64>,
     /// Number of chunks processed (chunk 0 is warmup)
     pub chunk_count: usize,
-    /// Samples already processed from audio buffer
+    /// Samples already processed from audio buffer (in source sample rate)
     pub processed_samples: usize,
+    /// Source sample rate of the audio buffer (may differ from target 16kHz)
+    pub source_sample_rate: u32,
     /// Streaming metadata from model
     pub metadata: StreamingMetadata,
     /// Vocabulary for token decoding
@@ -54,7 +57,11 @@ pub struct StreamingState {
 impl StreamingState {
     /// Initialize streaming state from STT engine
     /// Returns None if engine is not ready or not using Nemotron model
-    pub fn from_engine(engine: &mut SttEngine) -> Option<Self> {
+    ///
+    /// # Arguments
+    /// * `engine` - The STT engine to initialize from
+    /// * `source_sample_rate` - The sample rate of the audio buffer (will be resampled to 16kHz if different)
+    pub fn from_engine(engine: &mut SttEngine, source_sample_rate: u32) -> Option<Self> {
         use crate::models::ModelArchitecture;
 
         // Check if engine is ready and using streaming transducer
@@ -109,6 +116,7 @@ impl StreamingState {
                     tokens: Vec::new(),
                     chunk_count: 0,
                     processed_samples: 0,
+                    source_sample_rate,
                     metadata,
                     vocab,
                     mel_filterbank,
@@ -243,17 +251,33 @@ pub fn process_incremental(
     let total_samples = buffer.len();
     let new_samples = total_samples.saturating_sub(state.processed_samples);
 
-    // Check if we have enough new samples for a chunk
-    let chunk_samples = state.metadata.window_size * HOP_LENGTH;
-    if new_samples < chunk_samples {
+    // Calculate chunk size accounting for sample rate difference
+    // chunk_samples is in target 16kHz rate, we need to calculate equivalent in source rate
+    let chunk_samples_16k = state.metadata.window_size * HOP_LENGTH;
+    let chunk_samples_source = if state.source_sample_rate != SAMPLE_RATE {
+        // Scale chunk size to source sample rate
+        (chunk_samples_16k as f64 * state.source_sample_rate as f64 / SAMPLE_RATE as f64).ceil() as usize
+    } else {
+        chunk_samples_16k
+    };
+
+    // Check if we have enough new samples for a chunk (in source sample rate)
+    if new_samples < chunk_samples_source {
         return Ok(None);
     }
 
-    // Extract new audio for processing
-    let audio_slice = &buffer[state.processed_samples..];
+    // Extract new audio for processing (in source sample rate)
+    let audio_slice_source = &buffer[state.processed_samples..];
 
-    // Compute mel spectrogram for new audio
-    let mel_spec = compute_mel_spectrogram(audio_slice, &state.mel_filterbank);
+    // Resample to 16kHz if needed
+    let audio_slice: std::borrow::Cow<[f32]> = if state.source_sample_rate != SAMPLE_RATE {
+        std::borrow::Cow::Owned(resample_linear(audio_slice_source, state.source_sample_rate, SAMPLE_RATE))
+    } else {
+        std::borrow::Cow::Borrowed(audio_slice_source)
+    };
+
+    // Compute mel spectrogram for new audio (now at 16kHz)
+    let mel_spec = compute_mel_spectrogram(&audio_slice, &state.mel_filterbank);
     let total_frames = mel_spec.shape()[1];
 
     if total_frames < state.metadata.window_size {
@@ -461,8 +485,8 @@ pub fn process_incremental(
     state.cache_time = new_cache_time;
     state.cache_len = new_cache_len;
 
-    // Update processed samples count
-    state.processed_samples += chunk_samples;
+    // Update processed samples count (in source sample rate)
+    state.processed_samples += chunk_samples_source;
     state.chunk_count += 1;
 
     // Return partial text if new tokens were emitted

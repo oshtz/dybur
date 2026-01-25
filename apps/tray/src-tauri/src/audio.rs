@@ -463,7 +463,8 @@ fn build_input_stream_u16(
     )
 }
 
-fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+/// Resample audio from one sample rate to another using linear interpolation
+pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if input.is_empty() || in_rate == out_rate {
         return input.to_vec();
     }
