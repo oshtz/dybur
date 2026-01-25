@@ -507,34 +507,6 @@ var MODEL_REGISTRY = [
       supportsStreaming: false,
       maxDurationS: 30
     }
-  },
-  // Canary Qwen 2.5B - FP16
-  {
-    id: "canary-qwen-2.5b-fp16",
-    displayName: "Canary Qwen 2.5B (FP16)",
-    description: "Maximum accuracy, LLM-powered",
-    architecture: "llm_decoder",
-    repo: "onnx-community/canary-qwen-2.5b-ONNX",
-    files: [
-      { name: "onnx/decoder_model_merged_fp16.onnx", role: "decoder", required: true },
-      { name: "onnx/decoder_model_merged_fp16.onnx_data", role: "decoder_data", required: true },
-      { name: "onnx/decoder_model_merged_fp16.onnx_data_1", role: "decoder_data", required: true },
-      { name: "onnx/embed_tokens.onnx", role: "embeddings", required: true },
-      { name: "onnx/embed_tokens.onnx_data", role: "embeddings_data", required: true },
-      { name: "tokenizer.json", role: "vocab", required: true },
-      { name: "config.json", role: "config", required: false }
-    ],
-    sizeBytes: 47e8,
-    languages: [],
-    // Multilingual
-    isDefault: false,
-    config: {
-      vocabType: "bpe",
-      sampleRate: 16e3,
-      nMels: 128,
-      supportsStreaming: false,
-      maxDurationS: 60
-    }
   }
 ];
 function getModelDefinition(modelId) {

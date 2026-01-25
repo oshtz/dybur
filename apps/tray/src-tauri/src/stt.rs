@@ -233,6 +233,41 @@ impl SttEngine {
         &self.execution_provider
     }
 
+    /// Get the model architecture
+    pub fn get_architecture(&self) -> ModelArchitecture {
+        self.architecture
+    }
+
+    /// Get streaming metadata (for Nemotron model)
+    pub fn get_streaming_metadata(&self) -> Option<&StreamingMetadata> {
+        self.streaming_metadata.as_ref()
+    }
+
+    /// Get vocabulary (for SentencePiece models)
+    pub fn get_vocab(&self) -> Option<&[String]> {
+        self.vocab.as_deref()
+    }
+
+    /// Get Nemotron mel filterbank
+    pub fn get_nemotron_mel_filterbank(&self) -> Option<&Array2<f32>> {
+        self.nemotron_mel_filterbank.as_ref()
+    }
+
+    /// Get mutable reference to encoder session (for streaming)
+    pub fn get_encoder_session_mut(&mut self) -> Option<&mut Session> {
+        self.encoder_session.as_mut()
+    }
+
+    /// Get mutable reference to decoder session (for streaming)
+    pub fn get_decoder_session_mut(&mut self) -> Option<&mut Session> {
+        self.decoder_session.as_mut()
+    }
+
+    /// Get mutable reference to joiner session (for streaming)
+    pub fn get_joiner_session_mut(&mut self) -> Option<&mut Session> {
+        self.joiner_session.as_mut()
+    }
+
     /// Load model from config
     pub fn load(&mut self, config: SttConfig, gpu_preference: GpuPreference) -> Result<(), SttError> {
         self.state = SttState::Loading;

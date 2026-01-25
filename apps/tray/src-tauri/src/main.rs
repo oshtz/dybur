@@ -16,6 +16,7 @@ mod models;
 mod privacy;
 mod single_instance;
 mod state;
+mod streaming;
 mod stt;
 mod tokenizer;
 mod vad;
@@ -61,12 +62,20 @@ lazy_static::lazy_static! {
     static ref VAD_ENGINE: Mutex<vad::VadEngine> = Mutex::new(vad::VadEngine::new());
 }
 
+// Global streaming state (wrapped in Mutex for thread safety)
+lazy_static::lazy_static! {
+    static ref STREAMING_STATE: Mutex<Option<streaming::StreamingState>> = Mutex::new(None);
+}
+
+// Flag to signal streaming thread to stop
+static STREAMING_RUNNING: AtomicBool = AtomicBool::new(false);
+
 // Flag to track explicit quit request (to bypass prevent_exit)
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 const OVERLAY_LABEL: &str = "overlay";
-const OVERLAY_WIDTH: f64 = 260.0;
-const OVERLAY_HEIGHT: f64 = 64.0;
+const OVERLAY_WIDTH: f64 = 280.0;
+const OVERLAY_HEIGHT: f64 = 100.0; // Increased to fit streaming text
 const OVERLAY_MARGIN: f64 = 28.0;
 
 /// Application entry point
@@ -1440,6 +1449,14 @@ fn start_recording(app: &tauri::AppHandle) {
             set_overlay_state(app, RecordingState::Recording);
             log_info!("audio", "Recording started");
             update_tray_status(app, "Recording...");
+
+            // Initialize streaming if enabled and model supports it
+            let streaming_enabled = state_guard.config.streaming_enabled;
+            drop(state_guard); // Release state lock before starting streaming
+
+            if streaming_enabled {
+                start_streaming_inference(app);
+            }
         }
         Err(e) => {
             let help = get_audio_error_help(&e);
@@ -1454,6 +1471,9 @@ fn start_recording(app: &tauri::AppHandle) {
 
 /// Stop recording and process audio
 fn stop_recording(app: &tauri::AppHandle) {
+    // Stop streaming inference first (if running)
+    let streaming_text = stop_streaming_inference();
+
     let state = app.state::<Mutex<AppState>>();
     let mut state_guard = state.inner().lock().unwrap();
 
@@ -1461,6 +1481,15 @@ fn stop_recording(app: &tauri::AppHandle) {
     if !state_guard.is_recording {
         log_info!("audio", "Not recording, ignoring stop request");
         return;
+    }
+
+    // Emit final streaming result if available
+    if let Some(ref text) = streaming_text {
+        log_info!("streaming", "Final streaming text: {} chars", text.len());
+        let _ = app.emit("streaming-transcription", serde_json::json!({
+            "text": text,
+            "is_final": true
+        }));
     }
 
     // Retrieve audio data from global buffer (works across threads)
@@ -1625,6 +1654,129 @@ fn toggle_recording(app: &tauri::AppHandle) {
     } else {
         start_recording(app);
     }
+}
+
+/// Start streaming inference in background thread
+fn start_streaming_inference(app: &tauri::AppHandle) {
+    use crate::models::ModelArchitecture;
+
+    // Check if model supports streaming
+    let streaming_state = {
+        let mut engine = STT_ENGINE.lock().unwrap();
+        if engine.get_architecture() != ModelArchitecture::StreamingTransducer {
+            log_info!("streaming", "Model does not support streaming, skipping");
+            return;
+        }
+
+        // Initialize streaming state
+        match streaming::StreamingState::from_engine(&mut engine) {
+            Some(state) => state,
+            None => {
+                log_warn!("streaming", "Failed to initialize streaming state");
+                return;
+            }
+        }
+    };
+
+    // Store streaming state globally
+    {
+        let mut global_streaming = STREAMING_STATE.lock().unwrap();
+        *global_streaming = Some(streaming_state);
+    }
+
+    // Get buffer reference for streaming thread
+    let buffer_arc = {
+        let global_buffer = RECORDING_BUFFER.lock().unwrap();
+        match global_buffer.as_ref() {
+            Some(arc) => arc.clone(),
+            None => {
+                log_warn!("streaming", "No recording buffer available");
+                return;
+            }
+        }
+    };
+
+    // Signal streaming thread to run
+    STREAMING_RUNNING.store(true, Ordering::SeqCst);
+
+    // Start streaming polling thread
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        log_info!("streaming", "Streaming inference thread started");
+
+        while STREAMING_RUNNING.load(Ordering::SeqCst) {
+            // Poll every 500ms
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            if !STREAMING_RUNNING.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // Process incremental audio
+            let partial_text = {
+                let mut streaming_state = STREAMING_STATE.lock().unwrap();
+                let mut engine = STT_ENGINE.lock().unwrap();
+
+                if let Some(ref mut state) = *streaming_state {
+                    match streaming::process_incremental(state, &buffer_arc, &mut engine) {
+                        Ok(Some(text)) => Some(text),
+                        Ok(None) => None,
+                        Err(e) => {
+                            log_warn!("streaming", "Streaming inference error: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+
+            // Emit partial transcription to frontend
+            if let Some(text) = partial_text {
+                log_debug!("streaming", "Partial transcription: {}", text);
+                let _ = app_handle.emit("streaming-transcription", serde_json::json!({
+                    "text": text,
+                    "is_final": false
+                }));
+            }
+        }
+
+        log_info!("streaming", "Streaming inference thread stopped");
+    });
+
+    log_info!("streaming", "Streaming inference initialized");
+}
+
+/// Stop streaming inference and return final text if available
+fn stop_streaming_inference() -> Option<String> {
+    // Signal thread to stop
+    STREAMING_RUNNING.store(false, Ordering::SeqCst);
+
+    // Give thread time to finish current iteration
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Get final text from streaming state
+    let final_text = {
+        let mut streaming_state = STREAMING_STATE.lock().unwrap();
+        if let Some(ref state) = *streaming_state {
+            let text = state.get_partial_text();
+            if !text.is_empty() {
+                Some(text)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Clear streaming state
+    {
+        let mut streaming_state = STREAMING_STATE.lock().unwrap();
+        *streaming_state = None;
+    }
+
+    final_text
 }
 
 /// Update tray menu status

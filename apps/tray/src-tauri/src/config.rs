@@ -32,6 +32,9 @@ pub struct DyburConfig {
     /// GPU acceleration mode: "auto" (detect and use GPU if available) or "cpu" (CPU only)
     #[serde(default = "default_gpu_mode")]
     pub gpu_mode: String,
+    /// Enable real-time streaming transcription preview (Nemotron only)
+    #[serde(default = "default_streaming_enabled")]
+    pub streaming_enabled: bool,
 }
 
 fn default_recording_mode() -> String {
@@ -40,6 +43,10 @@ fn default_recording_mode() -> String {
 
 fn default_gpu_mode() -> String {
     "auto".to_string()
+}
+
+fn default_streaming_enabled() -> bool {
+    true
 }
 
 fn default_vad_enabled() -> bool {
@@ -69,6 +76,7 @@ impl Default for DyburConfig {
             vad_threshold: default_vad_threshold(),
             vad_min_speech_ms: default_vad_min_speech_ms(),
             gpu_mode: default_gpu_mode(),
+            streaming_enabled: default_streaming_enabled(),
         }
     }
 }
