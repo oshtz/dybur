@@ -186,20 +186,36 @@ impl Clipboard {
         use std::io::Write;
         use std::process::Stdio;
 
+        crate::log_debug!("injection", "Setting clipboard ({} chars)", text.len());
+
         let mut child = Command::new("pbcopy")
             .stdin(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+            .map_err(|e| {
+                crate::log_error!("injection", "Failed to spawn pbcopy: {}", e);
+                format!("Failed to set clipboard: {}", e)
+            })?;
 
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
                 .write_all(text.as_bytes())
-                .map_err(|e| format!("Failed to write to clipboard: {}", e))?;
+                .map_err(|e| {
+                    crate::log_error!("injection", "Failed to write to pbcopy: {}", e);
+                    format!("Failed to write to clipboard: {}", e)
+                })?;
         }
 
-        child
-            .wait()
-            .map_err(|e| format!("Clipboard command failed: {}", e))?;
+        let status = child.wait().map_err(|e| {
+            crate::log_error!("injection", "pbcopy failed: {}", e);
+            format!("Clipboard command failed: {}", e)
+        })?;
+
+        if !status.success() {
+            crate::log_error!("injection", "pbcopy exited with status: {}", status);
+            return Err(format!("pbcopy failed with status: {}", status));
+        }
+
+        crate::log_debug!("injection", "Clipboard set successfully");
         Ok(())
     }
 }
@@ -212,16 +228,50 @@ pub fn send_paste() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub fn send_paste() -> Result<(), String> {
-    // macOS: Use AppleScript
-    Command::new("osascript")
+    // macOS: Use AppleScript with System Events
+    // Note: This requires Accessibility permissions to be granted to the app
+
+    // First check if we have accessibility permissions by running a test
+    let check_result = Command::new("osascript")
+        .args(["-e", "tell application \"System Events\" to return (exists process 1)"])
+        .output();
+
+    if let Err(e) = check_result {
+        crate::log_error!("injection", "Failed to run osascript: {}", e);
+        return Err(format!("Failed to run osascript: {}", e));
+    }
+
+    // Send the paste command
+    let result = Command::new("osascript")
         .args([
             "-e",
             "tell application \"System Events\" to keystroke \"v\" using command down",
         ])
-        .output()
-        .map_err(|e| format!("Failed to send paste: {}", e))?;
+        .output();
 
-    Ok(())
+    match result {
+        Ok(output) => {
+            // Check for errors in stderr
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                crate::log_warn!("injection", "osascript stderr: {}", stderr);
+                // Common error: "System Events got an error: osascript is not allowed assistive access"
+                if stderr.contains("not allowed assistive access") || stderr.contains("accessibility") {
+                    return Err("Accessibility permissions required. Please grant dybur access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string());
+                }
+            }
+
+            // Give the system time to process the keystroke
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            crate::log_debug!("injection", "Paste keystroke sent via osascript");
+            Ok(())
+        }
+        Err(e) => {
+            crate::log_error!("injection", "Failed to send paste: {}", e);
+            Err(format!("Failed to send paste: {}", e))
+        }
+    }
 }
 
 /// Injection error types

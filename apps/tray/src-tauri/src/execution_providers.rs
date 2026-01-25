@@ -214,9 +214,19 @@ pub fn get_available_providers() -> Vec<&'static str> {
 }
 
 /// Parse GPU preference from string (for config)
+///
+/// On macOS, defaults to CPU because CoreML has compatibility issues with many models
+/// (especially Whisper and quantized models). Users can explicitly enable GPU with "gpu".
 pub fn parse_gpu_preference(mode: &str) -> GpuPreference {
     match mode.to_lowercase().as_str() {
         "cpu" | "cpu_only" | "cpuonly" | "disabled" | "off" | "false" => GpuPreference::CpuOnly,
-        _ => GpuPreference::Auto, // "auto", "gpu", "enabled", "on", "true", etc.
+        "gpu" | "coreml" | "directml" => GpuPreference::Auto, // Explicit GPU request
+        #[cfg(target_os = "macos")]
+        "auto" => {
+            // On macOS, default to CPU due to CoreML compatibility issues with many models
+            crate::log_info!("ort", "macOS detected, defaulting to CPU (CoreML has compatibility issues)");
+            GpuPreference::CpuOnly
+        }
+        _ => GpuPreference::Auto, // "auto" on Windows, or any other value
     }
 }
