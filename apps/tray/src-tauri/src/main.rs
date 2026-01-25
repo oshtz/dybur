@@ -1643,7 +1643,43 @@ fn stop_recording(app: &tauri::AppHandle) {
                         }
                         Err(e) => {
                             log_error!("injection", "Failed to inject text: {}", e);
-                            update_tray_status(app, "Injection failed");
+                            update_tray_status(app, "Paste failed - text on clipboard");
+
+                            // Show alert for accessibility permission issues on macOS
+                            #[cfg(target_os = "macos")]
+                            {
+                                let error_str = e.to_string();
+                                if error_str.contains("Accessibility") || error_str.contains("permission") || error_str.contains("not allowed") {
+                                    show_macos_alert(
+                                        "Accessibility Permission Required",
+                                        "dybur needs Accessibility permission to paste text automatically.\n\n\
+                                        A system dialog should have appeared asking for permission.\n\
+                                        If not, please go to:\n\
+                                        System Settings > Privacy & Security > Accessibility\n\n\
+                                        Then enable dybur in the list.\n\n\
+                                        Your transcribed text is on the clipboard - press Cmd+V to paste it manually."
+                                    );
+                                } else {
+                                    // Other injection error
+                                    show_macos_alert(
+                                        "Text Injection Failed",
+                                        &format!(
+                                            "Failed to paste text: {}\n\n\
+                                            Your transcribed text is on the clipboard - press Cmd+V to paste it manually.",
+                                            e
+                                        )
+                                    );
+                                }
+                            }
+
+                            #[cfg(target_os = "windows")]
+                            {
+                                // On Windows, show a notification
+                                show_windows_notification(
+                                    "Injection Failed",
+                                    &format!("Failed to paste text: {}. Text is on clipboard.", e)
+                                );
+                            }
                         }
                     }
                 }
