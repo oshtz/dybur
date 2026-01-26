@@ -1,8 +1,16 @@
 //! Speech-to-Text engine using ONNX Runtime
 //!
-//! Implements speech recognition using the Parakeet TDT model.
+//! Supports multiple model architectures:
+//! - TDT Transducer (Parakeet v2/v3)
+//! - Encoder-Decoder (Whisper)
+//! - Streaming Transducer (Nemotron)
+//! - LLM Decoder (Canary)
+//!
 //! Pipeline: Audio -> Mel Spectrogram -> Encoder -> Decoder -> Text
 
+use crate::execution_providers::{build_session, GpuPreference, SessionConfig};
+use crate::models::ModelArchitecture;
+use crate::tokenizer::BpeTokenizer;
 use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
 use ort::{
     session::{Session, SessionOutputs},
@@ -13,7 +21,7 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use std::path::PathBuf;
 use std::time::Instant;
 
-// Audio processing constants
+// Audio processing constants (Parakeet/NeMo default: 128 mels)
 const SAMPLE_RATE: u32 = 16000;
 const N_FFT: usize = 512;
 const HOP_LENGTH: usize = 160; // 10ms at 16kHz
@@ -21,6 +29,14 @@ const WIN_LENGTH: usize = 400; // 25ms at 16kHz
 const N_MELS: usize = 128;
 const MEL_FMIN: f32 = 0.0;
 const MEL_FMAX: f32 = 8000.0;
+
+// Whisper-specific constants (80 mel bins, different FFT params)
+const WHISPER_N_FFT: usize = 400;
+const WHISPER_HOP_LENGTH: usize = 160;
+const WHISPER_N_MELS: usize = 128; // Whisper v3 uses 128 mels
+const WHISPER_SAMPLE_RATE: u32 = 16000;
+const WHISPER_CHUNK_LENGTH: usize = 30; // 30 seconds per chunk
+const WHISPER_N_SAMPLES: usize = WHISPER_CHUNK_LENGTH * WHISPER_SAMPLE_RATE as usize;
 
 // Special token IDs for Parakeet TDT
 const BLANK_ID: i64 = 8192; // <blk>
@@ -33,10 +49,16 @@ pub struct SttConfig {
     pub encoder_path: PathBuf,
     /// Path to the decoder ONNX model
     pub decoder_path: PathBuf,
-    /// Path to vocabulary file
+    /// Path to joiner ONNX model (for Streaming Transducer/Nemotron)
+    pub joiner_path: Option<PathBuf>,
+    /// Path to embeddings ONNX model (for LLM Decoder/Canary)
+    pub embeddings_path: Option<PathBuf>,
+    /// Path to vocabulary file (vocab.txt for TDT, tokenizer.json for BPE)
     pub vocab_path: PathBuf,
     /// Inference timeout in milliseconds
     pub timeout_ms: u64,
+    /// Model architecture
+    pub architecture: ModelArchitecture,
 }
 
 /// Speech recognition result
@@ -103,16 +125,63 @@ pub enum SttState {
     Error,
 }
 
+/// Streaming model metadata (extracted from ONNX model metadata)
+/// These values are baked into the sherpa-onnx export and define the exact
+/// chunk size and cache dimensions required for inference.
+#[derive(Debug, Clone)]
+pub struct StreamingMetadata {
+    /// Window size in mel frames (chunk size to process)
+    pub window_size: usize,
+    /// Chunk shift (stride between chunks)
+    pub chunk_shift: usize,
+    /// Cache channel dimensions [batch, layers, time, features]
+    pub cache_last_channel_dims: [usize; 4],
+    /// Cache time dimensions [batch, layers, features, time]
+    pub cache_last_time_dims: [usize; 4],
+}
+
+impl Default for StreamingMetadata {
+    fn default() -> Self {
+        // Default values for att_context_size = [70, 13] (1120ms chunks)
+        Self {
+            window_size: 112,  // 14 output frames * 8 = 112 mel frames (1120ms)
+            chunk_shift: 112,
+            cache_last_channel_dims: [1, 24, 70, 1024],  // [batch, layers, left_context, encoder_dim]
+            cache_last_time_dims: [1, 24, 1024, 70],      // [batch, layers, encoder_dim, left_context]
+        }
+    }
+}
+
 /// Speech-to-Text engine
 pub struct SttEngine {
     config: Option<SttConfig>,
     state: SttState,
+    /// Model architecture (determines inference pipeline)
+    architecture: ModelArchitecture,
+    /// SentencePiece vocabulary for TDT/Nemotron models
     vocab: Option<Vec<String>>,
+    /// BPE tokenizer for Whisper/Canary models
+    bpe_tokenizer: Option<BpeTokenizer>,
     preprocessor_session: Option<Session>,
     encoder_session: Option<Session>,
     decoder_session: Option<Session>,
+    /// Joiner session for Streaming Transducer (Nemotron)
+    joiner_session: Option<Session>,
+    /// Embeddings session for LLM Decoder (Canary)
+    embeddings_session: Option<Session>,
+    /// Mel filterbank for TDT (128 bins)
     mel_filterbank: Option<Array2<f32>>,
+    /// Mel filterbank for Whisper (128 bins, different params)
+    whisper_mel_filterbank: Option<Array2<f32>>,
+    /// Mel filterbank for Nemotron (128 bins)
+    nemotron_mel_filterbank: Option<Array2<f32>>,
+    /// Streaming metadata for Nemotron (from ONNX model metadata)
+    streaming_metadata: Option<StreamingMetadata>,
     last_error: Option<SttError>,
+    /// Whether GPU acceleration is active
+    gpu_enabled: bool,
+    /// Name of the execution provider being used
+    execution_provider: String,
 }
 
 impl SttEngine {
@@ -121,12 +190,21 @@ impl SttEngine {
         Self {
             config: None,
             state: SttState::Unloaded,
+            architecture: ModelArchitecture::TdtTransducer,
             vocab: None,
+            bpe_tokenizer: None,
             preprocessor_session: None,
             encoder_session: None,
             decoder_session: None,
+            joiner_session: None,
+            embeddings_session: None,
             mel_filterbank: None,
+            whisper_mel_filterbank: None,
+            nemotron_mel_filterbank: None,
+            streaming_metadata: None,
             last_error: None,
+            gpu_enabled: false,
+            execution_provider: "None".to_string(),
         }
     }
 
@@ -145,12 +223,58 @@ impl SttEngine {
         self.last_error.as_ref()
     }
 
+    /// Check if GPU acceleration is enabled
+    pub fn is_gpu_enabled(&self) -> bool {
+        self.gpu_enabled
+    }
+
+    /// Get the name of the execution provider being used
+    pub fn execution_provider(&self) -> &str {
+        &self.execution_provider
+    }
+
+    /// Get the model architecture
+    pub fn get_architecture(&self) -> ModelArchitecture {
+        self.architecture
+    }
+
+    /// Get streaming metadata (for Nemotron model)
+    pub fn get_streaming_metadata(&self) -> Option<&StreamingMetadata> {
+        self.streaming_metadata.as_ref()
+    }
+
+    /// Get vocabulary (for SentencePiece models)
+    pub fn get_vocab(&self) -> Option<&[String]> {
+        self.vocab.as_deref()
+    }
+
+    /// Get Nemotron mel filterbank
+    pub fn get_nemotron_mel_filterbank(&self) -> Option<&Array2<f32>> {
+        self.nemotron_mel_filterbank.as_ref()
+    }
+
+    /// Get mutable reference to encoder session (for streaming)
+    pub fn get_encoder_session_mut(&mut self) -> Option<&mut Session> {
+        self.encoder_session.as_mut()
+    }
+
+    /// Get mutable reference to decoder session (for streaming)
+    pub fn get_decoder_session_mut(&mut self) -> Option<&mut Session> {
+        self.decoder_session.as_mut()
+    }
+
+    /// Get mutable reference to joiner session (for streaming)
+    pub fn get_joiner_session_mut(&mut self) -> Option<&mut Session> {
+        self.joiner_session.as_mut()
+    }
+
     /// Load model from config
-    pub fn load(&mut self, config: SttConfig) -> Result<(), SttError> {
+    pub fn load(&mut self, config: SttConfig, gpu_preference: GpuPreference) -> Result<(), SttError> {
         self.state = SttState::Loading;
         self.last_error = None;
 
-        crate::log_info!("model", "Loading STT model...");
+        let architecture = config.architecture;
+        crate::log_info!("model", "Loading STT model (architecture: {:?})...", architecture);
 
         // Validate paths exist
         if !config.encoder_path.exists() {
@@ -189,58 +313,90 @@ impl SttEngine {
             return Err(err);
         }
 
-        // Load vocabulary
-        let vocab = match load_vocabulary(&config.vocab_path) {
-            Ok(v) => v,
-            Err(e) => {
-                let err = SttError::ModelLoadFailed(format!("Failed to load vocabulary: {}", e));
-                self.state = SttState::Error;
-                self.last_error = Some(err.clone());
-                crate::log_error!("model", "{}", err);
-                return Err(err);
+        // Load vocabulary based on architecture
+        match architecture {
+            ModelArchitecture::TdtTransducer | ModelArchitecture::StreamingTransducer => {
+                // Load SentencePiece vocabulary (vocab.txt)
+                let vocab = match load_vocabulary(&config.vocab_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err = SttError::ModelLoadFailed(format!("Failed to load vocabulary: {}", e));
+                        self.state = SttState::Error;
+                        self.last_error = Some(err.clone());
+                        crate::log_error!("model", "{}", err);
+                        return Err(err);
+                    }
+                };
+                crate::log_info!("model", "Loaded SentencePiece vocabulary with {} tokens", vocab.len());
+                self.vocab = Some(vocab);
+                self.bpe_tokenizer = None;
             }
+            ModelArchitecture::EncoderDecoder => {
+                // Load BPE tokenizer (tokenizer.json)
+                let tokenizer = match BpeTokenizer::from_file(&config.vocab_path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let err = SttError::ModelLoadFailed(format!("Failed to load tokenizer: {}", e));
+                        self.state = SttState::Error;
+                        self.last_error = Some(err.clone());
+                        crate::log_error!("model", "{}", err);
+                        return Err(err);
+                    }
+                };
+                crate::log_info!("model", "Loaded BPE tokenizer with {} tokens", tokenizer.vocab_size());
+                self.bpe_tokenizer = Some(tokenizer);
+                self.vocab = None;
+            }
+        }
+
+        // Force CPU for models with DirectML compatibility issues
+        let session_config = match architecture {
+            ModelArchitecture::StreamingTransducer => {
+                crate::log_info!("model", "Using CPU for Nemotron model (DirectML incompatible)");
+                SessionConfig::cpu_only(4)
+            }
+            _ => SessionConfig::for_stt().with_gpu_preference(gpu_preference),
         };
 
-        crate::log_info!("model", "Loaded vocabulary with {} tokens", vocab.len());
+        // Load ONNX preprocessor (only for TDT models)
+        let preprocessor_session = match architecture {
+            ModelArchitecture::TdtTransducer => {
+                let preprocessor_path = config.encoder_path.parent()
+                    .map(|p| p.join("nemo128.onnx"));
 
-        // Try to load ONNX preprocessor (optional - fall back to manual computation if not found)
-        // The preprocessor is named nemo128.onnx in the istupakov/parakeet-tdt-0.6b-v3-onnx repo
-        let preprocessor_path = config.encoder_path.parent()
-            .map(|p| p.join("nemo128.onnx"));
-        
-        let preprocessor_session = if let Some(ref prep_path) = preprocessor_path {
-            if prep_path.exists() {
-                crate::log_info!("model", "Loading ONNX preprocessor...");
-                match (|| -> ort::Result<Session> {
-                    Session::builder()?
-                        .with_intra_threads(4)?
-                        .commit_from_file(prep_path)
-                })() {
-                    Ok(s) => {
-                        crate::log_info!("model", "ONNX preprocessor loaded");
-                        Some(s)
-                    }
-                    Err(e) => {
-                        crate::log_warn!("model", "Failed to load ONNX preprocessor, using manual computation: {}", e);
+                if let Some(ref prep_path) = preprocessor_path {
+                    if prep_path.exists() {
+                        crate::log_info!("model", "Loading ONNX preprocessor...");
+                        match build_session(prep_path, &session_config) {
+                            Ok((session, ep_result)) => {
+                                crate::log_info!(
+                                    "model",
+                                    "ONNX preprocessor loaded (provider: {}, GPU: {})",
+                                    ep_result.provider_name,
+                                    ep_result.is_gpu
+                                );
+                                Some(session)
+                            }
+                            Err(e) => {
+                                crate::log_warn!("model", "Failed to load ONNX preprocessor, using manual computation: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        crate::log_info!("model", "No ONNX preprocessor found, using manual mel computation");
                         None
                     }
+                } else {
+                    None
                 }
-            } else {
-                crate::log_info!("model", "No ONNX preprocessor found, using manual mel computation");
-                None
             }
-        } else {
-            None
+            _ => None, // Other architectures don't use NeMo preprocessor
         };
 
-        // Initialize ONNX Runtime sessions
+        // Initialize ONNX Runtime sessions with GPU acceleration
         crate::log_info!("model", "Loading encoder model...");
-        let encoder_session = match (|| -> ort::Result<Session> {
-            Session::builder()?
-                .with_intra_threads(4)?
-                .commit_from_file(&config.encoder_path)
-        })() {
-            Ok(s) => s,
+        let (encoder_session, encoder_ep) = match build_session(&config.encoder_path, &session_config) {
+            Ok(result) => result,
             Err(e) => {
                 let err = SttError::ModelLoadFailed(format!("Failed to load encoder: {}", e));
                 self.state = SttState::Error;
@@ -249,14 +405,39 @@ impl SttEngine {
                 return Err(err);
             }
         };
+        crate::log_info!(
+            "model",
+            "Encoder loaded (provider: {}, GPU: {})",
+            encoder_ep.provider_name,
+            encoder_ep.is_gpu
+        );
+
+        // Read streaming metadata for Nemotron models
+        let streaming_metadata = if architecture == ModelArchitecture::StreamingTransducer {
+            match Self::read_streaming_metadata(&encoder_session) {
+                Some(meta) => {
+                    crate::log_info!(
+                        "model",
+                        "Streaming metadata: window_size={}, chunk_shift={}, cache_channel={:?}, cache_time={:?}",
+                        meta.window_size,
+                        meta.chunk_shift,
+                        meta.cache_last_channel_dims,
+                        meta.cache_last_time_dims
+                    );
+                    Some(meta)
+                }
+                None => {
+                    crate::log_warn!("model", "No streaming metadata in encoder, using defaults");
+                    Some(StreamingMetadata::default())
+                }
+            }
+        } else {
+            None
+        };
 
         crate::log_info!("model", "Loading decoder model...");
-        let decoder_session = match (|| -> ort::Result<Session> {
-            Session::builder()?
-                .with_intra_threads(4)?
-                .commit_from_file(&config.decoder_path)
-        })() {
-            Ok(s) => s,
+        let (decoder_session, decoder_ep) = match build_session(&config.decoder_path, &session_config) {
+            Ok(result) => result,
             Err(e) => {
                 let err = SttError::ModelLoadFailed(format!("Failed to load decoder: {}", e));
                 self.state = SttState::Error;
@@ -265,36 +446,199 @@ impl SttEngine {
                 return Err(err);
             }
         };
+        crate::log_info!(
+            "model",
+            "Decoder loaded (provider: {}, GPU: {})",
+            decoder_ep.provider_name,
+            decoder_ep.is_gpu
+        );
 
-        // Pre-compute mel filterbank (fallback if no ONNX preprocessor)
-        let mel_filterbank = create_mel_filterbank(N_FFT, N_MELS, SAMPLE_RATE, MEL_FMIN, MEL_FMAX);
+        // Load joiner for StreamingTransducer (Nemotron)
+        let joiner_session = if let Some(ref joiner_path) = config.joiner_path {
+            if joiner_path.exists() {
+                crate::log_info!("model", "Loading joiner model...");
+                match build_session(joiner_path, &session_config) {
+                    Ok((session, ep_result)) => {
+                        crate::log_info!(
+                            "model",
+                            "Joiner loaded (provider: {}, GPU: {})",
+                            ep_result.provider_name,
+                            ep_result.is_gpu
+                        );
+                        Some(session)
+                    }
+                    Err(e) => {
+                        let err = SttError::ModelLoadFailed(format!("Failed to load joiner: {}", e));
+                        self.state = SttState::Error;
+                        self.last_error = Some(err.clone());
+                        crate::log_error!("model", "{}", err);
+                        return Err(err);
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Load optional embeddings model (if provided)
+        let embeddings_session = if let Some(ref embeddings_path) = config.embeddings_path {
+            if embeddings_path.exists() {
+                crate::log_info!("model", "Loading embeddings model...");
+                match build_session(embeddings_path, &session_config) {
+                    Ok((session, ep_result)) => {
+                        crate::log_info!(
+                            "model",
+                            "Embeddings loaded (provider: {}, GPU: {})",
+                            ep_result.provider_name,
+                            ep_result.is_gpu
+                        );
+                        Some(session)
+                    }
+                    Err(e) => {
+                        let err = SttError::ModelLoadFailed(format!("Failed to load embeddings: {}", e));
+                        self.state = SttState::Error;
+                        self.last_error = Some(err.clone());
+                        crate::log_error!("model", "{}", err);
+                        return Err(err);
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Pre-compute mel filterbanks based on architecture
+        let mel_filterbank = match architecture {
+            ModelArchitecture::TdtTransducer => {
+                Some(create_mel_filterbank(N_FFT, N_MELS, SAMPLE_RATE, MEL_FMIN, MEL_FMAX))
+            }
+            _ => None,
+        };
+
+        let whisper_mel_filterbank = match architecture {
+            ModelArchitecture::EncoderDecoder => {
+                // Whisper uses 128 mel bins with Whisper-style FFT params
+                Some(create_whisper_mel_filterbank())
+            }
+            _ => None,
+        };
+
+        let nemotron_mel_filterbank = match architecture {
+            ModelArchitecture::StreamingTransducer => {
+                // Nemotron uses 128 mel bins
+                Some(create_mel_filterbank(N_FFT, 128, SAMPLE_RATE, MEL_FMIN, MEL_FMAX))
+            }
+            _ => None,
+        };
 
         log_session_io("encoder", &encoder_session);
         log_session_io("decoder", &decoder_session);
 
-        self.vocab = Some(vocab);
+        self.architecture = architecture;
         self.preprocessor_session = preprocessor_session;
         self.encoder_session = Some(encoder_session);
         self.decoder_session = Some(decoder_session);
-        self.mel_filterbank = Some(mel_filterbank);
+        self.joiner_session = joiner_session;
+        self.embeddings_session = embeddings_session;
+        self.mel_filterbank = mel_filterbank;
+        self.whisper_mel_filterbank = whisper_mel_filterbank;
+        self.nemotron_mel_filterbank = nemotron_mel_filterbank;
+        self.streaming_metadata = streaming_metadata;
         self.config = Some(config);
         self.state = SttState::Ready;
+        self.gpu_enabled = encoder_ep.is_gpu;
+        self.execution_provider = encoder_ep.provider_name;
 
-        crate::log_info!("model", "STT model loaded successfully");
+        crate::log_info!(
+            "model",
+            "STT model loaded successfully (GPU: {}, provider: {})",
+            self.gpu_enabled,
+            self.execution_provider
+        );
 
         Ok(())
+    }
+
+    /// Read streaming metadata from ONNX model metadata
+    /// The sherpa-onnx export embeds streaming parameters in the model metadata
+    fn read_streaming_metadata(session: &Session) -> Option<StreamingMetadata> {
+        let metadata = session.metadata().ok()?;
+
+        // Helper to read a custom metadata key and parse as usize
+        let get_usize = |key: &str, default: usize| -> usize {
+            metadata.custom(key)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default)
+        };
+
+        // Log some metadata for debugging
+        if let Some(name) = metadata.name() {
+            crate::log_debug!("model", "ONNX model name: {}", name);
+        }
+        if let Some(desc) = metadata.description() {
+            crate::log_debug!("model", "ONNX model description: {}", desc);
+        }
+
+        // Log the streaming parameters we find
+        for key in &["window_size", "chunk_shift", "cache_last_channel_dim1", "cache_last_channel_dim2",
+                     "cache_last_channel_dim3", "cache_last_time_dim1", "cache_last_time_dim2", "cache_last_time_dim3"] {
+            if let Some(val) = metadata.custom(key) {
+                crate::log_debug!("model", "ONNX metadata: {} = {}", key, val);
+            }
+        }
+
+        // Parse window_size
+        let window_size = get_usize("window_size", 112);
+
+        // Parse chunk_shift
+        let chunk_shift = get_usize("chunk_shift", window_size);
+
+        // Parse cache channel dimensions
+        // Metadata gives us 3 dims (no batch): layers, context, encoder_dim
+        // We need shape [batch=1, layers, context, encoder_dim]
+        let cache_channel_dim1 = get_usize("cache_last_channel_dim1", 24);   // layers
+        let cache_channel_dim2 = get_usize("cache_last_channel_dim2", 70);   // left_context
+        let cache_channel_dim3 = get_usize("cache_last_channel_dim3", 1024); // encoder_dim
+
+        // Parse cache time dimensions
+        // Metadata gives us 3 dims (no batch): layers, encoder_dim, time_context
+        // We need shape [batch=1, layers, encoder_dim, time_context]
+        let cache_time_dim1 = get_usize("cache_last_time_dim1", 24);   // layers
+        let cache_time_dim2 = get_usize("cache_last_time_dim2", 1024); // encoder_dim
+        let cache_time_dim3 = get_usize("cache_last_time_dim3", 8);    // time_context
+
+        Some(StreamingMetadata {
+            window_size,
+            chunk_shift,
+            // Add batch dimension (1) as first element
+            cache_last_channel_dims: [1, cache_channel_dim1, cache_channel_dim2, cache_channel_dim3],
+            cache_last_time_dims: [1, cache_time_dim1, cache_time_dim2, cache_time_dim3],
+        })
     }
 
     /// Unload model and free resources
     pub fn unload(&mut self) {
         self.config = None;
+        self.architecture = ModelArchitecture::TdtTransducer;
         self.vocab = None;
+        self.bpe_tokenizer = None;
         self.preprocessor_session = None;
         self.encoder_session = None;
         self.decoder_session = None;
+        self.joiner_session = None;
+        self.embeddings_session = None;
         self.mel_filterbank = None;
+        self.whisper_mel_filterbank = None;
+        self.nemotron_mel_filterbank = None;
+        self.streaming_metadata = None;
         self.state = SttState::Unloaded;
         self.last_error = None;
+        self.gpu_enabled = false;
+        self.execution_provider = "None".to_string();
 
         crate::log_info!("model", "STT model unloaded");
     }
@@ -387,6 +731,16 @@ impl SttEngine {
 
     /// Run the ONNX inference pipeline
     fn run_inference(&mut self, audio: &[f32]) -> Result<String, SttError> {
+        // Dispatch to architecture-specific inference
+        match self.architecture {
+            ModelArchitecture::TdtTransducer => self.run_tdt_inference(audio),
+            ModelArchitecture::EncoderDecoder => self.run_whisper_inference(audio),
+            ModelArchitecture::StreamingTransducer => self.run_nemotron_inference(audio),
+        }
+    }
+
+    /// Run TDT (Parakeet) inference pipeline
+    fn run_tdt_inference(&mut self, audio: &[f32]) -> Result<String, SttError> {
         // Extract vocab info first to avoid borrow conflicts
         let vocab = self.vocab.as_ref().ok_or(SttError::NotLoaded)?.clone();
         let vocab_len = vocab.len();
@@ -483,6 +837,805 @@ impl SttEngine {
 
         Ok(text)
     }
+
+    /// Run Whisper (Encoder-Decoder) inference pipeline
+    fn run_whisper_inference(&mut self, audio: &[f32]) -> Result<String, SttError> {
+        // Get BPE tokenizer (required for Whisper)
+        let tokenizer = self.bpe_tokenizer.as_ref().ok_or(SttError::NotLoaded)?;
+        let eot_token_id = tokenizer.eot_token_id;
+        let sot_token_id = tokenizer.sot_token_id;
+
+        // Get Whisper mel filterbank
+        let mel_filterbank = self.whisper_mel_filterbank.as_ref().ok_or(SttError::NotLoaded)?;
+
+        // Step 1: Compute Whisper-style mel spectrogram
+        crate::log_debug!("model", "Computing Whisper mel spectrogram...");
+        let mel_spec = compute_whisper_mel_spectrogram(audio, mel_filterbank);
+        crate::log_debug!("model", "Mel spectrogram shape: {:?}", mel_spec.shape());
+
+        // Shape: [batch=1, n_mels, time_steps] -> transpose to [batch, time, n_mels]
+        // Whisper encoder expects shape [batch, n_mels, frames]
+        let mel_input = mel_spec.insert_axis(Axis(0));
+        let mel_input_dyn = mel_input.into_dyn();
+
+        // Step 2: Run encoder
+        crate::log_debug!("model", "Running Whisper encoder...");
+        let mel_tensor = TensorRef::from_array_view(mel_input_dyn.view())
+            .map_err(|e| SttError::InferenceFailed(format!("Failed to create mel tensor: {}", e)))?;
+
+        // Extract encoder outputs within a scope to release the borrow
+        let (encoder_output, encoder_kv_cache) = {
+            let encoder = self.encoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+            let encoder_outputs = encoder
+                .run(ort::inputs![mel_tensor])
+                .map_err(|e| SttError::InferenceFailed(format!("Whisper encoder failed: {}", e)))?;
+
+            // Log all encoder outputs
+            crate::log_debug!("model", "Whisper encoder outputs:");
+            for (name, _) in encoder_outputs.iter() {
+                crate::log_debug!("model", "  - '{}'", name);
+            }
+
+            // Extract encoder hidden states (first output)
+            let (_, encoder_hidden) = encoder_outputs
+                .iter()
+                .next()
+                .ok_or_else(|| SttError::InferenceFailed("No encoder output".to_string()))?;
+
+            let (enc_shape, enc_data) = encoder_hidden
+                .try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract encoder output: {}", e)))?;
+
+            let hidden_states = ArrayD::from_shape_vec(enc_shape.to_ixdyn(), enc_data.to_vec())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape encoder output: {}", e)))?;
+
+            // Collect cross-attention KV cache outputs if present
+            let mut kv_cache: Vec<(String, ArrayD<f32>)> = Vec::new();
+            for (name, value) in encoder_outputs.iter() {
+                if name.contains("key_values") || name.contains("cross_attention") {
+                    if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+                        if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                            kv_cache.push((name.to_string(), arr));
+                        }
+                    }
+                }
+            }
+
+            (hidden_states, kv_cache)
+        };
+
+        crate::log_debug!("model", "Encoder output shape: {:?}", encoder_output.shape());
+        if !encoder_kv_cache.is_empty() {
+            crate::log_debug!("model", "Encoder produced {} KV cache tensors", encoder_kv_cache.len());
+        }
+
+        // Step 3: Autoregressive decoding with KV-cache
+        crate::log_debug!("model", "Running Whisper decoder (autoregressive)...");
+        let tokens = self.whisper_decode_with_kv_cache(&encoder_output, sot_token_id, eot_token_id)?;
+
+        // Step 4: Decode tokens to text using BPE tokenizer
+        let tokenizer = self.bpe_tokenizer.as_ref().ok_or(SttError::NotLoaded)?;
+        let text = tokenizer.decode(&tokens, true);
+
+        // Post-process: trim and capitalize
+        let text = text.trim().to_string();
+        let text = if let Some(first_char) = text.chars().next() {
+            let mut result = first_char.to_uppercase().to_string();
+            result.push_str(&text[first_char.len_utf8()..]);
+            result
+        } else {
+            text
+        };
+
+        Ok(text)
+    }
+
+    /// Whisper autoregressive decoding
+    /// Uses the standard decoder (not with_past) which takes encoder_hidden_states directly
+    fn whisper_decode_with_kv_cache(
+        &mut self,
+        encoder_output: &ArrayD<f32>,
+        sot_token_id: i64,
+        eot_token_id: i64,
+    ) -> Result<Vec<i64>, SttError> {
+        use crate::tokenizer::whisper_tokens;
+
+        let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+
+        // Log decoder inputs on first call
+        crate::log_debug!("model", "Whisper decoder inputs:");
+        for input in decoder.inputs() {
+            crate::log_debug!("model", "  - '{}' {:?}", input.name(), input.dtype());
+        }
+
+        // Find input names dynamically
+        let (token_input_name, encoder_input_name) = {
+            let mut token_name = "input_ids".to_string();
+            let mut encoder_name = "encoder_hidden_states".to_string();
+            for input in decoder.inputs() {
+                let name = input.name();
+                let name_lower = name.to_lowercase();
+                if name_lower.contains("input_id") || name_lower == "tokens" {
+                    token_name = name.to_string();
+                }
+                if name_lower.contains("encoder") && name_lower.contains("hidden") {
+                    encoder_name = name.to_string();
+                }
+            }
+            (token_name, encoder_name)
+        };
+        crate::log_debug!("model", "Using input names: token='{}', encoder='{}'", token_input_name, encoder_input_name);
+
+        // Initial decoder input sequence: [SOT, language, task, notimestamps]
+        let mut all_tokens: Vec<i64> = vec![
+            sot_token_id,
+            whisper_tokens::EN,           // English
+            whisper_tokens::TRANSCRIBE,   // Transcribe task
+            whisper_tokens::NO_TIMESTAMPS, // No timestamps
+        ];
+
+        let mut output_tokens: Vec<i64> = Vec::new();
+        let max_tokens = 448; // Whisper's default max length
+
+        // Pre-convert encoder tensor to avoid repeated allocations
+        let encoder_dyn = encoder_output.clone().into_dyn();
+
+        for step in 0..max_tokens {
+            // Prepare input tensor with all tokens so far
+            let input_ids = Array2::from_shape_vec((1, all_tokens.len()), all_tokens.clone())
+                .map_err(|e| SttError::InferenceFailed(format!("input_ids: {}", e)))?;
+
+            let input_ids_tensor = TensorRef::from_array_view(input_ids.view())
+                .map_err(|e| SttError::InferenceFailed(format!("input_ids tensor: {}", e)))?;
+
+            // Log tensor info before decoder run
+            if step == 0 {
+                crate::log_debug!("model", "Decoder step 0: input_ids shape {:?}, encoder shape {:?}",
+                    input_ids.shape(), encoder_output.shape());
+            }
+
+            // Run decoder with all tokens and encoder hidden states
+            crate::log_debug!("model", "Running decoder step {} with {} tokens: {:?}", step, all_tokens.len(), all_tokens);
+
+            // Create tensor refs for this iteration
+            let encoder_tensor = TensorRef::from_array_view(encoder_dyn.view())
+                .map_err(|e| SttError::InferenceFailed(format!("encoder tensor: {}", e)))?;
+
+            let outputs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decoder.run(ort::inputs![
+                    token_input_name.as_str() => input_ids_tensor.into_dyn(),
+                    encoder_input_name.as_str() => encoder_tensor.into_dyn()
+                ])
+            }));
+
+            let outputs = match outputs {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => {
+                    crate::log_error!("model", "Decoder error at step {}: {}", step, e);
+                    return Err(SttError::InferenceFailed(format!("Decoder failed at step {}: {}", step, e)));
+                }
+                Err(panic) => {
+                    crate::log_error!("model", "Decoder panic at step {}: {:?}", step, panic);
+                    return Err(SttError::InferenceFailed(format!("Decoder panicked at step {}", step)));
+                }
+            };
+            crate::log_debug!("model", "Decoder step {} complete", step);
+
+            // Extract logits
+            let logits = outputs
+                .iter()
+                .find(|(name, _)| *name == "logits" || *name == "output_0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| SttError::InferenceFailed("No logits output found".to_string()))?;
+
+            let (logits_shape, logits_data) = logits
+                .try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract logits: {}", e)))?;
+
+            // Get the last token's logits: shape is [batch, seq_len, vocab_size]
+            let vocab_size = logits_shape.last().copied().unwrap_or(0) as usize;
+            let seq_len = if logits_shape.len() >= 2 { logits_shape[1] as usize } else { 1 };
+
+            // Get logits for the last position
+            let last_pos_start = (seq_len - 1) * vocab_size;
+            let last_logits = &logits_data[last_pos_start..last_pos_start + vocab_size];
+
+            // Greedy decoding: argmax over vocabulary
+            let next_token = last_logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx as i64)
+                .unwrap_or(eot_token_id);
+
+            // Check for end of text
+            if next_token == eot_token_id {
+                crate::log_debug!("model", "Whisper decoder: EOT at step {}", step);
+                break;
+            }
+
+            // Add predicted token to sequence
+            all_tokens.push(next_token);
+            output_tokens.push(next_token);
+        }
+
+        crate::log_debug!("model", "Whisper decoder: generated {} tokens", output_tokens.len());
+        Ok(output_tokens)
+    }
+
+    /// Run Nemotron (Streaming Transducer) inference pipeline
+    /// Uses encoder-decoder-joiner architecture similar to RNN-T
+    fn run_nemotron_inference(&mut self, audio: &[f32]) -> Result<String, SttError> {
+        // Get vocabulary (Nemotron uses text file vocab like TDT)
+        let vocab = self.vocab.as_ref().ok_or(SttError::NotLoaded)?.clone();
+
+        // Get streaming metadata (read from ONNX model at load time)
+        let metadata = self.streaming_metadata.as_ref()
+            .ok_or_else(|| SttError::InferenceFailed("No streaming metadata available".to_string()))?
+            .clone();
+
+        // Get Nemotron mel filterbank (128 bins)
+        let mel_filterbank = self.nemotron_mel_filterbank.as_ref().ok_or(SttError::NotLoaded)?;
+
+        // Step 1: Compute mel spectrogram (128 bins for Nemotron)
+        crate::log_debug!("model", "Computing Nemotron mel spectrogram (128 bins)...");
+        let mel_spec = compute_mel_spectrogram_generic(audio, mel_filterbank, 128);
+        crate::log_debug!("model", "Mel spectrogram shape: {:?}", mel_spec.shape());
+
+        // Use streaming parameters from metadata
+        let chunk_size = metadata.window_size;
+        let chunk_shift = metadata.chunk_shift;
+        let cache_channel_dims = metadata.cache_last_channel_dims;
+        let cache_time_dims = metadata.cache_last_time_dims;
+
+        crate::log_debug!(
+            "model",
+            "Using streaming params: chunk_size={}, chunk_shift={}, cache_channel={:?}, cache_time={:?}",
+            chunk_size, chunk_shift, cache_channel_dims, cache_time_dims
+        );
+
+        let total_frames = mel_spec.shape()[1];
+        crate::log_debug!("model", "Processing {} mel frames in chunks of {}", total_frames, chunk_size);
+
+        // Initialize cache tensors using metadata dimensions
+        let mut cache_channel = ArrayD::<f32>::zeros(IxDyn(&[
+            cache_channel_dims[0],
+            cache_channel_dims[1],
+            cache_channel_dims[2],
+            cache_channel_dims[3]
+        ]));
+        let mut cache_time = ArrayD::<f32>::zeros(IxDyn(&[
+            cache_time_dims[0],
+            cache_time_dims[1],
+            cache_time_dims[2],
+            cache_time_dims[3]
+        ]));
+        // Cache length starts at 0 (no cached frames yet)
+        let mut cache_len_val: i64 = 0;
+
+        // Initialize decoder states for streaming decode
+        // LSTM has both hidden state (h) and cell state (c)
+        let decoder_hidden_dim = 640;
+        let mut decoder_h_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim])); // states.1 -> hidden
+        let mut decoder_c_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim])); // onnx::Slice_3 -> cell
+
+        // Find blank token
+        let blank_id = find_token_id(&vocab, "<blk>")
+            .or_else(|| find_token_id(&vocab, "<blank>"))
+            .unwrap_or((vocab.len() - 1) as i64) as i32;
+
+        crate::log_debug!("model", "Blank token ID: {} (vocab size: {})", blank_id, vocab.len());
+
+        // Collect all tokens from streaming decode
+        let mut all_tokens: Vec<i64> = Vec::new();
+        let max_tokens = 500;
+        let max_symbols_per_step = 10;
+
+        // Initialize decoder output ONCE with BOS token (token 0, not blank)
+        // Blank token (1024) is for joiner output only, not decoder input
+        // Token 0 (<unk>) often serves as BOS in SentencePiece vocabularies
+        let bos_token = 0i32;
+        let (decoder_dim, mut current_dec_output) = {
+            let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+
+            let init_targets = Array2::<i32>::from_elem((1, 1), bos_token);
+            let init_target_length = Array1::<i32>::from_elem(1, 1);
+            let init_targets_tensor = TensorRef::from_array_view(init_targets.view())
+                .map_err(|e| SttError::InferenceFailed(format!("init_targets: {}", e)))?;
+            let init_target_length_tensor = TensorRef::from_array_view(init_target_length.view())
+                .map_err(|e| SttError::InferenceFailed(format!("init_target_length: {}", e)))?;
+            let init_h_tensor = TensorRef::from_array_view(decoder_h_state.view())
+                .map_err(|e| SttError::InferenceFailed(format!("init_h: {}", e)))?;
+            let init_c_tensor = TensorRef::from_array_view(decoder_c_state.view())
+                .map_err(|e| SttError::InferenceFailed(format!("init_c: {}", e)))?;
+
+            let init_dec_outputs = decoder
+                .run(ort::inputs![
+                    "targets" => init_targets_tensor,
+                    "target_length" => init_target_length_tensor,
+                    "states.1" => init_h_tensor,
+                    "onnx::Slice_3" => init_c_tensor
+                ])
+                .map_err(|e| SttError::InferenceFailed(format!("Initial decoder failed: {}", e)))?;
+
+            // Extract initial decoder representation
+            let init_dec_out = init_dec_outputs.get("outputs")
+                .ok_or_else(|| SttError::InferenceFailed("No initial decoder outputs".to_string()))?;
+            let (init_dec_shape, init_dec_data) = init_dec_out.try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract initial decoder output: {}", e)))?;
+
+            let dim = init_dec_shape[1] as usize;
+            let output: Vec<f32> = init_dec_data.to_vec();
+
+            // Update states from initial decoder run
+            if let Some(h) = init_dec_outputs.get("states") {
+                if let Ok((shape, data)) = h.try_extract_tensor::<f32>() {
+                    if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                        decoder_h_state = arr;
+                    }
+                }
+            }
+            if let Some(c) = init_dec_outputs.get("162") {
+                if let Ok((shape, data)) = c.try_extract_tensor::<f32>() {
+                    if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                        decoder_c_state = arr;
+                    }
+                }
+            }
+
+            (dim, output)
+        };
+
+        crate::log_debug!("model", "Initial decoder output: {} dims (BOS token: {})", decoder_dim, bos_token);
+
+        // Step 2: Process audio in chunks WITH STREAMING DECODE
+        crate::log_debug!("model", "Running Nemotron streaming encoder+decoder...");
+        let mut offset = 0;
+        let mut chunk_idx = 0;
+        while offset < total_frames && all_tokens.len() < max_tokens {
+            let chunk_end = (offset + chunk_size).min(total_frames);
+            let chunk_len = chunk_end - offset;
+
+            // Skip chunks that are too short (encoder needs minimum context)
+            // Empty or very short chunks cause "Invalid input shape: {0}" errors
+            const MIN_CHUNK_LEN: usize = 16;
+            if chunk_len < MIN_CHUNK_LEN {
+                crate::log_debug!("model", "Skipping short final chunk ({} frames < {})", chunk_len, MIN_CHUNK_LEN);
+                break;
+            }
+
+            // Extract chunk: [n_mels, chunk_len]
+            let chunk = mel_spec.slice(ndarray::s![.., offset..chunk_end]).to_owned();
+            // Shape: [batch=1, n_mels=128, chunk_len]
+            let chunk_input = chunk.insert_axis(Axis(0)).into_dyn();
+
+            let mel_tensor = TensorRef::from_array_view(chunk_input.view())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to create mel tensor: {}", e)))?;
+
+            let length = Array1::<i64>::from_vec(vec![chunk_len as i64]);
+            let length_tensor = TensorRef::from_array_view(length.view())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to create length tensor: {}", e)))?;
+
+            let cache_channel_tensor = TensorRef::from_array_view(cache_channel.view())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to create cache_channel tensor: {}", e)))?;
+
+            let cache_time_tensor = TensorRef::from_array_view(cache_time.view())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to create cache_time tensor: {}", e)))?;
+
+            let cache_len = Array1::<i64>::from_vec(vec![cache_len_val]);
+            let cache_len_tensor = TensorRef::from_array_view(cache_len.view())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to create cache_len tensor: {}", e)))?;
+
+            // Run encoder on this chunk
+            let encoder = self.encoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+            let encoder_outputs = encoder
+                .run(ort::inputs![
+                    "audio_signal" => mel_tensor,
+                    "length" => length_tensor,
+                    "cache_last_channel" => cache_channel_tensor,
+                    "cache_last_time" => cache_time_tensor,
+                    "cache_last_channel_len" => cache_len_tensor
+                ])
+                .map_err(|e| SttError::InferenceFailed(format!("Nemotron encoder chunk failed: {}", e)))?;
+
+            // Extract encoder output for this chunk
+            let enc_out = encoder_outputs
+                .get("outputs")
+                .ok_or_else(|| SttError::InferenceFailed("No 'outputs' from encoder".to_string()))?;
+            let (enc_shape, enc_data) = enc_out
+                .try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract encoder output: {}", e)))?;
+
+            // Encoder output shape: [1, 1024, time_frames]
+            let encoder_dim = enc_shape[1] as usize;
+            let time_frames = enc_shape[2] as usize;
+
+            if chunk_idx == 0 {
+                crate::log_debug!("model", "Chunk {} encoder output: {} frames x {} dim", chunk_idx, time_frames, encoder_dim);
+            }
+
+            // STREAMING DECODE: Process each encoder frame from this chunk immediately
+            let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+            let joiner = self.joiner_session.as_mut().ok_or(SttError::NotLoaded)?;
+
+            // Skip decoding for chunk 0 - encoder cache isn't populated yet, output is unreliable
+            // We still processed chunk 0's encoder to populate the cache for subsequent chunks
+            if chunk_idx == 0 {
+                crate::log_debug!("model", "Chunk 0: skipping decode (warmup), cache will be populated");
+                // Update encoder cache and continue to next chunk
+                let cache_channel_next = encoder_outputs
+                    .get("cache_last_channel_next")
+                    .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next".to_string()))?;
+                let (shape, data) = cache_channel_next
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
+                cache_channel = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
+
+                let cache_time_next = encoder_outputs
+                    .get("cache_last_time_next")
+                    .ok_or_else(|| SttError::InferenceFailed("No cache_last_time_next".to_string()))?;
+                let (shape, data) = cache_time_next
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
+                cache_time = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
+
+                let cache_len_next = encoder_outputs
+                    .get("cache_last_channel_next_len")
+                    .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next_len".to_string()))?;
+                let (_, len_data) = cache_len_next
+                    .try_extract_tensor::<i64>()
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache_len: {}", e)))?;
+                cache_len_val = len_data[0];
+
+                offset += chunk_shift;
+                chunk_idx += 1;
+                continue;
+            }
+
+            for t in 0..time_frames {
+                if all_tokens.len() >= max_tokens {
+                    break;
+                }
+
+                // Get encoder frame at timestep t: [1, encoder_dim, 1]
+                let enc_frame_data: Vec<f32> = (0..encoder_dim)
+                    .map(|f| enc_data[f * time_frames + t])
+                    .collect();
+                let enc_frame = ArrayD::from_shape_vec(IxDyn(&[1, encoder_dim, 1]), enc_frame_data)
+                    .map_err(|e| SttError::InferenceFailed(format!("enc_frame: {}", e)))?;
+
+                // Inner loop: emit symbols until blank
+                // Use CACHED decoder output - only run decoder after emitting non-blank
+                let mut symbols_emitted = 0;
+                loop {
+                    if symbols_emitted >= max_symbols_per_step || all_tokens.len() >= max_tokens {
+                        break;
+                    }
+
+                    // Build decoder frame from cached output [1, decoder_dim, 1]
+                    let dec_frame = ArrayD::from_shape_vec(
+                        IxDyn(&[1, decoder_dim, 1]),
+                        current_dec_output.clone()
+                    ).map_err(|e| SttError::InferenceFailed(format!("dec_frame: {}", e)))?;
+
+                    // Run joiner with encoder frame + cached decoder output
+                    let enc_tensor = TensorRef::from_array_view(enc_frame.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("enc_tensor: {}", e)))?;
+                    let dec_tensor = TensorRef::from_array_view(dec_frame.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("dec_tensor: {}", e)))?;
+
+                    let joiner_outputs = joiner
+                        .run(ort::inputs![
+                            "encoder_outputs" => enc_tensor,
+                            "decoder_outputs" => dec_tensor
+                        ])
+                        .map_err(|e| SttError::InferenceFailed(format!("Joiner failed: {}", e)))?;
+
+                    // Extract logits
+                    let logits = joiner_outputs.iter().next()
+                        .ok_or_else(|| SttError::InferenceFailed("No joiner output".to_string()))?;
+                    let (_, logits_data) = logits.1.try_extract_tensor::<f32>()
+                        .map_err(|e| SttError::InferenceFailed(format!("Failed to extract logits: {}", e)))?;
+
+                    // Greedy decode - find top tokens for debugging
+                    let mut indexed: Vec<(usize, f32)> = logits_data.iter().enumerate()
+                        .map(|(i, &v)| (i, v))
+                        .collect();
+                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                    let next_token = indexed[0].0 as i64;
+
+                    // Log top 3 tokens on first few frames for debugging
+                    if chunk_idx == 0 && t < 3 {
+                        let top3: Vec<String> = indexed.iter().take(3)
+                            .map(|(idx, score)| {
+                                let tok = vocab.get(*idx).map(|s| s.as_str()).unwrap_or("?");
+                                format!("{}:'{}' ({:.3})", idx, tok, score)
+                            })
+                            .collect();
+                        crate::log_debug!("model", "Frame {} top tokens: {}", t, top3.join(", "));
+                    }
+
+                    // If blank, move to next encoder frame (keep decoder state unchanged)
+                    if next_token == blank_id as i64 {
+                        break;
+                    }
+
+                    // Emit token
+                    if all_tokens.len() < 20 {
+                        let token_str = vocab.get(next_token as usize).map(|s| s.as_str()).unwrap_or("?");
+                        crate::log_debug!("model", "Emit token {}: '{}' at chunk {} frame {}", next_token, token_str, chunk_idx, t);
+                    }
+                    all_tokens.push(next_token);
+                    symbols_emitted += 1;
+
+                    // NOW run decoder with the newly emitted token to update decoder output
+                    let new_targets = Array2::<i32>::from_elem((1, 1), next_token as i32);
+                    let new_target_length = Array1::<i32>::from_elem(1, 1);
+
+                    let new_targets_tensor = TensorRef::from_array_view(new_targets.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("new_targets: {}", e)))?;
+                    let new_target_length_tensor = TensorRef::from_array_view(new_target_length.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("new_target_length: {}", e)))?;
+                    let h_tensor = TensorRef::from_array_view(decoder_h_state.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("h_state: {}", e)))?;
+                    let c_tensor = TensorRef::from_array_view(decoder_c_state.view())
+                        .map_err(|e| SttError::InferenceFailed(format!("c_state: {}", e)))?;
+
+                    let decoder_outputs = decoder
+                        .run(ort::inputs![
+                            "targets" => new_targets_tensor,
+                            "target_length" => new_target_length_tensor,
+                            "states.1" => h_tensor,
+                            "onnx::Slice_3" => c_tensor
+                        ])
+                        .map_err(|e| SttError::InferenceFailed(format!("Decoder update failed: {}", e)))?;
+
+                    // Update cached decoder output
+                    if let Some(dec_out) = decoder_outputs.get("outputs") {
+                        if let Ok((_, data)) = dec_out.try_extract_tensor::<f32>() {
+                            current_dec_output = data.to_vec();
+                        }
+                    }
+
+                    // Update decoder states
+                    if let Some(h) = decoder_outputs.get("states") {
+                        if let Ok((shape, data)) = h.try_extract_tensor::<f32>() {
+                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                                decoder_h_state = arr;
+                            }
+                        }
+                    }
+                    if let Some(c) = decoder_outputs.get("162") {
+                        if let Ok((shape, data)) = c.try_extract_tensor::<f32>() {
+                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                                decoder_c_state = arr;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update encoder cache for next chunk
+            let cache_channel_next = encoder_outputs
+                .get("cache_last_channel_next")
+                .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next".to_string()))?;
+            let (shape, data) = cache_channel_next
+                .try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
+            cache_channel = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
+
+            let cache_time_next = encoder_outputs
+                .get("cache_last_time_next")
+                .ok_or_else(|| SttError::InferenceFailed("No cache_last_time_next".to_string()))?;
+            let (shape, data) = cache_time_next
+                .try_extract_tensor::<f32>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
+            cache_time = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
+
+            let cache_len_next = encoder_outputs
+                .get("cache_last_channel_next_len")
+                .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next_len".to_string()))?;
+            let (_, len_data) = cache_len_next
+                .try_extract_tensor::<i64>()
+                .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache_len: {}", e)))?;
+            cache_len_val = len_data[0];
+
+            // Move offset by chunk_shift
+            offset += chunk_shift;
+            chunk_idx += 1;
+        }
+
+        crate::log_debug!("model", "Streaming decode complete: {} tokens from {} chunks", all_tokens.len(), chunk_idx);
+
+        let tokens = all_tokens;
+
+        // Step 4: Decode tokens to text
+        let text = decode_tokens(&tokens, &vocab);
+
+        Ok(text)
+    }
+
+    /// Streaming Transducer decoding (RNN-T style)
+    /// Uses the Nemotron decoder with named inputs:
+    /// - targets: Int32 [batch, seq]
+    /// - target_length: Int32 [batch]
+    /// - states.1: Float32 [2, batch, 640]
+    /// - onnx::Slice_3: Float32 [2, 1, 640]
+    fn streaming_transducer_decode(
+        &mut self,
+        encoder_output: &ArrayD<f32>,
+        vocab: &[String],
+    ) -> Result<Vec<i64>, SttError> {
+        let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
+        let joiner = self.joiner_session.as_mut().ok_or(SttError::NotLoaded)?;
+
+        // Find blank token - in SentencePiece vocab, it's often the last token
+        let blank_id = find_token_id(vocab, "<blk>")
+            .or_else(|| find_token_id(vocab, "<blank>"))
+            .or_else(|| find_token_id(vocab, "▁"))  // Word boundary often used as blank
+            .unwrap_or((vocab.len() - 1) as i64) as i32;  // Default to last token
+
+        crate::log_debug!("model", "Blank token ID: {} (vocab size: {})", blank_id, vocab.len());
+
+        let mut output_tokens: Vec<i64> = Vec::new();
+        let max_tokens = 500;
+        let max_symbols_per_step = 10; // Max symbols to emit per encoder frame
+
+        // Encoder output shape: [batch=1, features=1024, time]
+        let enc_shape = encoder_output.shape();
+        let time_steps = enc_shape[2]; // time dimension
+        let encoder_dim = enc_shape[1]; // 1024
+
+        crate::log_debug!("model", "Transducer decode: {} time steps, {} encoder dim", time_steps, encoder_dim);
+
+        // Initialize decoder state: [2, batch=1, 640]
+        let decoder_hidden_dim = 640;
+        let mut decoder_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim]));
+        let slice_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim]));
+
+        // Process each encoder timestep
+        for t in 0..time_steps {
+            if output_tokens.len() >= max_tokens {
+                break;
+            }
+
+            // Get encoder frame at timestep t: [1, encoder_dim, 1] (joiner expects 3D)
+            let encoder_frame: Vec<f32> = (0..encoder_dim)
+                .map(|f| encoder_output[[0, f, t]])
+                .collect();
+            let enc_frame_arr = ArrayD::from_shape_vec(IxDyn(&[1, encoder_dim, 1]), encoder_frame)
+                .map_err(|e| SttError::InferenceFailed(format!("enc_frame: {}", e)))?;
+
+            // Inner loop: emit symbols until blank
+            let mut symbols_emitted = 0;
+            loop {
+                if symbols_emitted >= max_symbols_per_step {
+                    break;
+                }
+
+                // Prepare decoder inputs
+                // targets: the last emitted token (or 0/BOS for start - NOT blank)
+                // In RNN-T, blank means "no output", BOS (usually 0) is the start token
+                let prev_token = output_tokens.last().map(|&t| t as i32).unwrap_or(0);
+                let targets = Array2::<i32>::from_elem((1, 1), prev_token);
+                let target_length = Array1::<i32>::from_elem(1, 1);
+
+                let targets_tensor = TensorRef::from_array_view(targets.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("targets: {}", e)))?;
+                let target_length_tensor = TensorRef::from_array_view(target_length.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("target_length: {}", e)))?;
+                let states_tensor = TensorRef::from_array_view(decoder_state.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("states: {}", e)))?;
+                let slice_tensor = TensorRef::from_array_view(slice_state.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("slice: {}", e)))?;
+
+                // Run decoder
+                let decoder_outputs = decoder
+                    .run(ort::inputs![
+                        "targets" => targets_tensor,
+                        "target_length" => target_length_tensor,
+                        "states.1" => states_tensor,
+                        "onnx::Slice_3" => slice_tensor
+                    ])
+                    .map_err(|e| SttError::InferenceFailed(format!("Decoder failed: {}", e)))?;
+
+                // Extract decoder output: 'outputs' shape [1, 640, 1]
+                let dec_out = decoder_outputs.get("outputs")
+                    .ok_or_else(|| SttError::InferenceFailed("No decoder outputs".to_string()))?;
+                let (dec_shape, dec_data) = dec_out.try_extract_tensor::<f32>()
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to extract decoder output: {}", e)))?;
+
+                // Reshape decoder output for joiner: [1, 640, 1] (joiner expects 3D)
+                let dec_dim = dec_shape[1] as usize;
+                let dec_frame: Vec<f32> = (0..dec_dim).map(|d| dec_data[d]).collect();
+                let dec_frame_arr = ArrayD::from_shape_vec(IxDyn(&[1, dec_dim, 1]), dec_frame)
+                    .map_err(|e| SttError::InferenceFailed(format!("dec_frame: {}", e)))?;
+
+                // Update decoder state from 'states' output (or '162' as fallback)
+                let state_updated = if let Some(new_state) = decoder_outputs.get("states") {
+                    if let Ok((shape, data)) = new_state.try_extract_tensor::<f32>() {
+                        if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                            decoder_state = arr;
+                            true
+                        } else { false }
+                    } else { false }
+                } else if let Some(new_state) = decoder_outputs.get("162") {
+                    if let Ok((shape, data)) = new_state.try_extract_tensor::<f32>() {
+                        if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                            decoder_state = arr;
+                            true
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if t == 0 && symbols_emitted == 0 && !state_updated {
+                    crate::log_warn!("model", "Decoder state not updated!");
+                }
+
+                // Run joiner with encoder and decoder outputs (both 3D: [1, dim, 1])
+                let enc_tensor = TensorRef::from_array_view(enc_frame_arr.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("enc_tensor: {}", e)))?;
+                let dec_tensor = TensorRef::from_array_view(dec_frame_arr.view())
+                    .map_err(|e| SttError::InferenceFailed(format!("dec_tensor: {}", e)))?;
+
+                let joiner_outputs = joiner
+                    .run(ort::inputs![
+                        "encoder_outputs" => enc_tensor,
+                        "decoder_outputs" => dec_tensor
+                    ])
+                    .map_err(|e| SttError::InferenceFailed(format!("Joiner failed: {}", e)))?;
+
+                // Extract logits from joiner (first output)
+                let logits = joiner_outputs.iter().next()
+                    .ok_or_else(|| SttError::InferenceFailed("No joiner output".to_string()))?;
+
+                let (logits_shape, logits_data) = logits.1.try_extract_tensor::<f32>()
+                    .map_err(|e| SttError::InferenceFailed(format!("Failed to extract logits: {}", e)))?;
+
+                // Log joiner output shape on first iteration
+                if t == 0 && symbols_emitted == 0 {
+                    crate::log_debug!("model", "Joiner output shape: {:?}, {} logits", logits_shape, logits_data.len());
+                    // Log top 5 logits
+                    let mut indexed: Vec<(usize, f32)> = logits_data.iter().cloned().enumerate().collect();
+                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    let top5: Vec<_> = indexed.iter().take(5).collect();
+                    crate::log_debug!("model", "Top 5 logits: {:?}", top5);
+                }
+
+                // Greedy decode: argmax
+                let next_token = logits_data
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx as i64)
+                    .unwrap_or(blank_id as i64);
+
+                // If blank, move to next encoder frame
+                if next_token == blank_id as i64 {
+                    break;
+                }
+
+                // Log emitted tokens
+                if output_tokens.len() < 20 {
+                    let token_str = vocab.get(next_token as usize).map(|s| s.as_str()).unwrap_or("?");
+                    crate::log_debug!("model", "Emit token {}: '{}' at frame {}", next_token, token_str, t);
+                }
+
+                // Emit non-blank token
+                output_tokens.push(next_token);
+                symbols_emitted += 1;
+            }
+        }
+
+        crate::log_debug!("model", "Nemotron decoder: generated {} tokens", output_tokens.len());
+        Ok(output_tokens)
+    }
+
 }
 
 /// Greedy decoding for TDT model
@@ -1483,6 +2636,90 @@ fn create_mel_filterbank(
     filterbank
 }
 
+/// Create Whisper-specific mel filterbank (128 bins, 80Hz-7600Hz range)
+fn create_whisper_mel_filterbank() -> Array2<f32> {
+    // Whisper v3 uses 128 mel bins (v1/v2 used 80)
+    // FFT size 400, sample rate 16000
+    // Frequency range: 0 Hz to 8000 Hz (Nyquist for 16kHz)
+    create_mel_filterbank(WHISPER_N_FFT, WHISPER_N_MELS, WHISPER_SAMPLE_RATE, 0.0, 8000.0)
+}
+
+/// Compute Whisper-style mel spectrogram from audio
+fn compute_whisper_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array2<f32> {
+    let n_fft = WHISPER_N_FFT;
+    let hop_length = WHISPER_HOP_LENGTH;
+
+    // Whisper expects exactly 30 seconds of audio (padded or truncated)
+    let n_samples = WHISPER_N_SAMPLES;
+    let mut audio_chunk = vec![0.0f32; n_samples];
+    let copy_len = audio.len().min(n_samples);
+    audio_chunk[..copy_len].copy_from_slice(&audio[..copy_len]);
+
+    // Center-pad audio with n_fft // 2 on each side (this matches PyTorch's stft behavior)
+    let pad_size = n_fft / 2;
+    let mut padded_audio = vec![0.0f32; pad_size];
+    padded_audio.extend_from_slice(&audio_chunk);
+    padded_audio.extend(vec![0.0f32; pad_size]);
+
+    // Create Hann window
+    let window: Vec<f32> = (0..n_fft)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos()))
+        .collect();
+
+    // Calculate number of frames (with center padding, this gives exactly n_samples / hop_length = 3000)
+    let n_frames = n_samples / hop_length;
+
+    // Create FFT planner
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(n_fft);
+
+    // Compute STFT
+    let n_freqs = n_fft / 2 + 1;
+    let mut power_spec = Array2::zeros((n_freqs, n_frames));
+
+    for frame_idx in 0..n_frames {
+        let start = frame_idx * hop_length;
+
+        // Extract frame and apply window
+        let mut buffer: Vec<Complex<f32>> = (0..n_fft)
+            .map(|i| {
+                let sample = if start + i < padded_audio.len() {
+                    padded_audio[start + i] * window[i]
+                } else {
+                    0.0
+                };
+                Complex::new(sample, 0.0)
+            })
+            .collect();
+
+        // Apply FFT
+        fft.process(&mut buffer);
+
+        // Compute magnitude squared
+        for (k, &val) in buffer.iter().take(n_freqs).enumerate() {
+            power_spec[[k, frame_idx]] = val.norm_sqr();
+        }
+    }
+
+    // Apply mel filterbank
+    let mel_spec = mel_filterbank.dot(&power_spec);
+
+    // Apply log10 transform with clamping (Whisper style)
+    // log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+    // log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+    // log_spec = (log_spec + 4.0) / 4.0
+    let log_mel_spec = mel_spec.mapv(|x| x.max(1e-10).log10());
+
+    // Find max for clamping
+    let max_val = log_mel_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let clamped = log_mel_spec.mapv(|x| x.max(max_val - 8.0));
+
+    // Normalize to [-1, 1] range
+    let normalized = clamped.mapv(|x| (x + 4.0) / 4.0);
+
+    normalized
+}
+
 /// Compute mel spectrogram from audio (NeMo-compatible)
 fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array2<f32> {
     let n_fft = N_FFT;
@@ -1577,6 +2814,83 @@ fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array
     normalized
 }
 
+/// Compute mel spectrogram with configurable number of mel bins (for Nemotron)
+fn compute_mel_spectrogram_generic(audio: &[f32], mel_filterbank: &Array2<f32>, n_mels: usize) -> Array2<f32> {
+    let n_fft = N_FFT;
+    let hop_length = HOP_LENGTH;
+    let win_length = WIN_LENGTH;
+
+    // Pre-emphasis filter
+    let preemph = 0.97f32;
+    let mut preemphasized: Vec<f32> = Vec::with_capacity(audio.len());
+    for i in 0..audio.len() {
+        if i == 0 {
+            preemphasized.push(audio[i]);
+        } else {
+            preemphasized.push(audio[i] - preemph * audio[i - 1]);
+        }
+    }
+
+    // Add dither
+    let dither = 1e-5f32;
+    for sample in &mut preemphasized {
+        *sample += dither * (rand_simple() * 2.0 - 1.0);
+    }
+
+    // Create Hann window
+    let window: Vec<f32> = (0..win_length)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / win_length as f32).cos()))
+        .collect();
+
+    // Pad audio
+    let pad_length = n_fft / 2;
+    let mut padded_audio = vec![0.0f32; pad_length];
+    padded_audio.extend_from_slice(&preemphasized);
+    padded_audio.extend(vec![0.0f32; pad_length]);
+
+    // Calculate number of frames
+    let n_frames = 1 + (padded_audio.len() - n_fft) / hop_length;
+
+    // Create FFT planner
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(n_fft);
+
+    // Compute STFT
+    let n_freqs = n_fft / 2 + 1;
+    let mut power_spec = Array2::zeros((n_freqs, n_frames));
+
+    for frame_idx in 0..n_frames {
+        let start = frame_idx * hop_length;
+
+        let mut buffer: Vec<Complex<f32>> = (0..n_fft)
+            .map(|i| {
+                let sample = if i < win_length && start + i < padded_audio.len() {
+                    padded_audio[start + i] * window[i]
+                } else {
+                    0.0
+                };
+                Complex::new(sample, 0.0)
+            })
+            .collect();
+
+        fft.process(&mut buffer);
+
+        for (k, &val) in buffer.iter().take(n_freqs).enumerate() {
+            power_spec[[k, frame_idx]] = val.norm_sqr();
+        }
+    }
+
+    // Apply mel filterbank (use provided filterbank, assumes correct n_mels)
+    let _ = n_mels; // Used to indicate expected mel bins, filterbank determines actual
+    let mel_spec = mel_filterbank.dot(&power_spec);
+
+    // Convert to log scale (use log10 for NeMo/Nemotron compatibility)
+    // NeMo models expect raw log mel without per-feature normalization
+    let log_mel_spec = mel_spec.mapv(|x| (x.max(1e-10)).log10());
+
+    log_mel_spec
+}
+
 // Simple pseudo-random number generator (deterministic, no external deps)
 fn rand_simple() -> f32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1589,13 +2903,58 @@ fn rand_simple() -> f32 {
 
 /// Get model paths from the models directory
 pub fn get_model_paths(model_name: &str) -> Option<SttConfig> {
+    use crate::models::{get_model_paths as get_registry_paths, normalize_model_name, get_model_path};
+
+    // First try to get paths from the model registry
+    let model_id = normalize_model_name(model_name);
+
+    if let Some(model_paths) = get_registry_paths(model_id) {
+        // Check if required files exist based on architecture
+        let files_exist = match model_paths.architecture {
+            ModelArchitecture::TdtTransducer | ModelArchitecture::EncoderDecoder => {
+                model_paths.encoder_path.exists()
+                    && model_paths.decoder_path.exists()
+                    && model_paths.vocab_path.exists()
+            }
+            ModelArchitecture::StreamingTransducer => {
+                model_paths.encoder_path.exists()
+                    && model_paths.decoder_path.exists()
+                    && model_paths.joiner_path.as_ref().map_or(false, |p| p.exists())
+                    && model_paths.vocab_path.exists()
+            }
+        };
+
+        if files_exist {
+            return Some(SttConfig {
+                encoder_path: model_paths.encoder_path,
+                decoder_path: model_paths.decoder_path,
+                joiner_path: model_paths.joiner_path,
+                embeddings_path: model_paths.embeddings_path,
+                vocab_path: model_paths.vocab_path,
+                timeout_ms: 30000,
+                architecture: model_paths.architecture,
+            });
+        }
+    }
+
+    // Fallback: Legacy path resolution for unknown models
     let models_dir = crate::config::get_models_dir();
     let model_dir = models_dir.join(model_name);
 
     if !model_dir.exists() {
-        return None;
+        // Also try with normalized name
+        let model_dir_normalized = get_model_path(model_id);
+        if !model_dir_normalized.exists() {
+            return None;
+        }
+        return get_model_paths_legacy(&model_dir_normalized);
     }
 
+    get_model_paths_legacy(&model_dir)
+}
+
+/// Legacy model path resolution for backward compatibility
+fn get_model_paths_legacy(model_dir: &std::path::Path) -> Option<SttConfig> {
     // Prefer INT8 quantized models
     let encoder_int8 = model_dir.join("encoder-model.int8.onnx");
     let decoder_int8 = model_dir.join("decoder_joint-model.int8.onnx");
@@ -1622,8 +2981,11 @@ pub fn get_model_paths(model_name: &str) -> Option<SttConfig> {
     Some(SttConfig {
         encoder_path,
         decoder_path,
+        joiner_path: None,
+        embeddings_path: None,
         vocab_path: vocab,
-        timeout_ms: 30000, // 30 second default timeout
+        timeout_ms: 30000,
+        architecture: ModelArchitecture::TdtTransducer, // Legacy models are always TDT
     })
 }
 

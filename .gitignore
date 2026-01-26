@@ -12,6 +12,10 @@ target/
 apps/tray/src-tauri/target/
 apps/tray/src-tauri/gen/
 apps/tray/src-tauri/nul
+apps/tray/src-tauri/binaries/
+
+# CLI compiled binaries
+packages/cli/bin/
 
 # IDE
 .idea/

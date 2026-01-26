@@ -5,10 +5,22 @@
 
 // Model management
 export {
+  // Model registry
+  MODEL_REGISTRY,
+  getModelDefinition,
+  getDefaultModelDefinition,
+  getAvailableModels,
+  normalizeModelName,
+  buildDownloadUrl,
+  type ModelArchitecture,
+  type VocabType,
+  type FileRole,
+  type ModelFile,
+  type ModelConfig,
+  type ModelDefinition,
+  // Model operations
   DEFAULT_MODEL,
-  MODEL_BASE_URL,
   MODEL_REPO,
-  MODEL_FILES,
   ensureModelsDir,
   listModels,
   isModelInstalled,

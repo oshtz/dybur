@@ -1,6 +1,6 @@
 [package]
 name = "dybur-app"
-version = "1.1.0"
+version = "1.2.0"
 description = "dybur - Local voice dictation"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
 license = "MIT"
@@ -23,14 +23,13 @@ rodio = "0.18"
 chrono = "0.4"
 lazy_static = "1.4"
 
-# ONNX Runtime for STT inference (using dynamic linking to avoid MSVC version issues)
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
+# ndarray for tensor operations (ort is platform-specific below for GPU support)
 ndarray = "0.17"
 
 # Audio processing for mel spectrograms
 rustfft = "6.2"
 
-# Windows-specific dependencies for native keyboard/clipboard
+# Windows-specific dependencies for native keyboard/clipboard + GPU
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
@@ -41,6 +40,24 @@ windows = { version = "0.58", features = [
     "Win32_Globalization",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi"
+] }
+# ONNX Runtime with DirectML for GPU acceleration on Windows
+ort = { version = "2.0.0-rc.11", default-features = false, features = [
+    "std", "ndarray", "download-binaries", "copy-dylibs", "tls-native",
+    "directml"
+] }
+
+# macOS-specific: ONNX Runtime with CoreML for GPU/Neural Engine acceleration
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "2.0.0-rc.11", default-features = false, features = [
+    "std", "ndarray", "download-binaries", "copy-dylibs", "tls-native",
+    "coreml"
+] }
+
+# Other platforms (Linux, etc.): CPU-only ONNX Runtime
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+ort = { version = "2.0.0-rc.11", default-features = false, features = [
+    "std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"
 ] }
 
 [features]

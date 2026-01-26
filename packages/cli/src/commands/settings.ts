@@ -39,6 +39,12 @@ export async function settingsCommand(args: string[]): Promise<void> {
     keyValue('Silence timeout', `${config.silenceTimeoutMs}ms`);
     keyValue('Model', config.model);
     keyValue('Clipboard cleanup', config.clipboardCleanup ? 'enabled' : 'disabled');
+    keyValue('Recording mode', config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle');
+    keyValue('VAD (silence filter)', config.vadEnabled ? 'enabled' : 'disabled');
+    if (config.vadEnabled) {
+      keyValue('  VAD threshold', `${config.vadThreshold}`);
+      keyValue('  VAD min speech', `${config.vadMinSpeechMs}ms`);
+    }
 
     console.log('');
     console.log(`  ${dim('Path:')} ${configPath}`);

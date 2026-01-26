@@ -169,6 +169,51 @@
           animation: none;
         }
       }
+
+      /* Streaming transcription text */
+      .overlay {
+        position: relative;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .streaming-text {
+        max-width: 240px;
+        max-height: 36px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        background: linear-gradient(135deg, rgba(6, 10, 8, 0.95), rgba(14, 22, 18, 0.85));
+        border: 1px solid rgba(94, 255, 192, 0.25);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--text);
+        text-align: left;
+        line-height: 1.3;
+        opacity: 0;
+        transform: translateY(5px);
+        transition: opacity 0.15s ease, transform 0.15s ease;
+        word-wrap: break-word;
+        overflow-y: auto;
+        overflow-x: hidden;
+        order: -1; /* Place above the pill in flex layout */
+        scrollbar-width: none; /* Hide scrollbar Firefox */
+        -ms-overflow-style: none; /* Hide scrollbar IE/Edge */
+      }
+
+      .streaming-text::-webkit-scrollbar {
+        display: none; /* Hide scrollbar Chrome/Safari */
+      }
+
+      .streaming-text.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .streaming-text.final {
+        border-color: var(--accent);
+        box-shadow: 0 0 8px rgba(94, 255, 192, 0.2);
+      }
     </style>
   </head>
   <body>
@@ -191,10 +236,14 @@
           <span></span>
         </div>
       </div>
+      <!-- Streaming transcription preview -->
+      <div id="streaming-text" class="streaming-text"></div>
     </div>
 
     <script>
       const status = document.getElementById('status');
+      const streamingText = document.getElementById('streaming-text');
+      let hideTimeout = null;
 
       // Update label based on recording state (window visibility is controlled by Rust)
       function updateState(state) {
@@ -204,6 +253,41 @@
           status.textContent = '...';
         } else {
           status.textContent = 'IDLE';
+          // Hide streaming text when not recording
+          hideStreamingText();
+        }
+      }
+
+      // Show streaming transcription text
+      function showStreamingText(text, isFinal) {
+        if (hideTimeout) {
+          clearTimeout(hideTimeout);
+          hideTimeout = null;
+        }
+
+        streamingText.textContent = text;
+        streamingText.classList.add('visible');
+
+        // Auto-scroll to bottom to show latest text
+        streamingText.scrollTop = streamingText.scrollHeight;
+
+        if (isFinal) {
+          streamingText.classList.add('final');
+          // Hide after a delay for final result
+          hideTimeout = setTimeout(() => {
+            hideStreamingText();
+          }, 2000);
+        } else {
+          streamingText.classList.remove('final');
+        }
+      }
+
+      // Hide streaming text
+      function hideStreamingText() {
+        streamingText.classList.remove('visible', 'final');
+        if (hideTimeout) {
+          clearTimeout(hideTimeout);
+          hideTimeout = null;
         }
       }
 
@@ -211,6 +295,14 @@
       if (window.__TAURI__ && window.__TAURI__.event) {
         window.__TAURI__.event.listen('recording-state', (event) => {
           updateState(event.payload);
+        });
+
+        // Listen for streaming transcription updates
+        window.__TAURI__.event.listen('streaming-transcription', (event) => {
+          const { text, is_final } = event.payload;
+          if (text) {
+            showStreamingText(text, is_final);
+          }
         });
       }
     </script>

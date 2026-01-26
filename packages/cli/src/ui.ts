@@ -37,6 +37,10 @@ const colors = {
   bgBlue: '\x1b[44m',
   bgMagenta: '\x1b[45m',
   bgCyan: '\x1b[46m',
+
+  // dybur brand colors (RGB true color)
+  accent: '\x1b[38;2;94;255;192m',      // #5effc0 - mint green accent
+  textPrimary: '\x1b[38;2;201;255;232m', // #c9ffe8 - light mint text
 };
 
 // Check if colors are supported
@@ -56,7 +60,8 @@ function dim(text: string): string {
 }
 
 function green(text: string): string {
-  return c('green', text);
+  // Use brand accent color instead of green for consistent branding
+  return c('accent', text);
 }
 
 function red(text: string): string {
@@ -68,7 +73,8 @@ function yellow(text: string): string {
 }
 
 function cyan(text: string): string {
-  return c('cyan', text);
+  // Use brand accent color instead of cyan for consistent branding
+  return c('accent', text);
 }
 
 function magenta(text: string): string {
@@ -80,19 +86,22 @@ function gray(text: string): string {
 }
 
 function blue(text: string): string {
-  return c('blue', text);
+  // Use brand accent color instead of blue for consistent branding
+  return c('accent', text);
 }
 
 /**
  * dybur brand colors
+ * Primary: #c9ffe8 (light mint - text)
+ * Accent: #5effc0 (mint green - highlights, CTAs)
  */
 export const brand = {
-  primary: (text: string) => c('brightCyan', text),
-  accent: (text: string) => c('brightMagenta', text),
-  success: green,
+  primary: (text: string) => c('textPrimary', text),
+  accent: (text: string) => c('accent', text),
+  success: (text: string) => c('accent', text),  // Use brand accent for success
   error: red,
   warning: yellow,
-  info: cyan,
+  info: (text: string) => c('textPrimary', text),
   muted: gray,
   highlight: bold,
 };
@@ -112,18 +121,18 @@ ${brand.primary('└────────────────────
 export const LOGO_INLINE = `${brand.accent('dybur')}`;
 
 /**
- * Status icons
+ * Status icons - using dybur brand colors and Unicode symbols
  */
 export const icons = {
-  success: green('✓'),
-  error: red('✗'),
-  warning: yellow('⚠'),
-  info: cyan('ℹ'),
-  arrow: cyan('→'),
-  bullet: dim('•'),
-  recording: red('●'),
-  idle: dim('○'),
-  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+  success: c('accent', '✓'),      // U+2713 Check Mark
+  error: red('✗'),                // U+2717 Ballot X
+  warning: yellow('⚠'),           // U+26A0 Warning Sign
+  info: c('textPrimary', '✳'),    // U+2733 Eight Spoked Asterisk
+  arrow: c('accent', '→'),        // U+2192 Rightwards Arrow
+  bullet: dim('•'),               // U+2022 Bullet
+  recording: red('●'),            // U+25CF Black Circle
+  idle: dim('○'),                 // U+25CB White Circle
+  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],  // Braille pattern dots
 };
 
 /**
@@ -208,9 +217,9 @@ export function info(message: string): void {
  */
 export function command(cmd: string, description?: string): void {
   if (description) {
-    console.log(`  ${cyan(cmd)}  ${dim(description)}`);
+    console.log(`  ${c('accent', cmd)}  ${dim(description)}`);
   } else {
-    console.log(`  ${cyan(cmd)}`);
+    console.log(`  ${c('accent', cmd)}`);
   }
 }
 
@@ -260,10 +269,10 @@ export class Spinner {
       return;
     }
 
-    process.stdout.write(`  ${cyan(icons.spinner[0]!)} ${this.message}`);
+    process.stdout.write(`  ${c('accent', icons.spinner[0]!)} ${this.message}`);
     this.interval = setInterval(() => {
       this.frame = (this.frame + 1) % icons.spinner.length;
-      process.stdout.write(`\r  ${cyan(icons.spinner[this.frame]!)} ${this.message}`);
+      process.stdout.write(`\r  ${c('accent', icons.spinner[this.frame]!)} ${this.message}`);
     }, 80);
   }
 
@@ -456,7 +465,7 @@ export async function select<T>(options: {
         const choice = choices[i]!;
         const isSelected = i === selectedIndex;
         const cursor = isSelected ? brand.accent('❯') : ' ';
-        const label = isSelected ? cyan(choice.label) : choice.label;
+        const label = isSelected ? brand.accent(choice.label) : choice.label;
         const hint = choice.hint ? dim(` (${choice.hint})`) : '';
         lines.push(`  ${cursor} ${label}${hint}`);
       }

@@ -9,6 +9,111 @@
 use std::process::Command;
 use std::time::Duration;
 
+// ============================================================================
+// macOS Accessibility Permission Check
+// ============================================================================
+
+#[cfg(target_os = "macos")]
+mod macos_accessibility {
+    use std::ffi::c_void;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        static kCFBooleanTrue: *const c_void;
+    }
+
+    // This is the key for the prompt option
+    // "AXTrustedCheckOptionPrompt"
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: *const c_void;
+    }
+
+    /// Check if the process has Accessibility permissions
+    pub fn is_accessibility_enabled() -> bool {
+        unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
+    }
+
+    /// Check if the process has Accessibility permissions, optionally prompting the user
+    /// If prompt is true, shows a system dialog directing the user to Security & Privacy settings
+    pub fn check_accessibility_with_prompt(prompt: bool) -> bool {
+        unsafe {
+            if !prompt {
+                return AXIsProcessTrustedWithOptions(std::ptr::null());
+            }
+
+            // Create options dictionary with kAXTrustedCheckOptionPrompt = true
+            let keys: [*const c_void; 1] = [kAXTrustedCheckOptionPrompt];
+            let values: [*const c_void; 1] = [kCFBooleanTrue];
+
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks as *const _ as *const c_void,
+                &kCFTypeDictionaryValueCallBacks as *const _ as *const c_void,
+            );
+
+            let result = AXIsProcessTrustedWithOptions(options);
+
+            if !options.is_null() {
+                CFRelease(options);
+            }
+
+            result
+        }
+    }
+}
+
+/// Check if we have Accessibility permissions (macOS only)
+/// Returns true on non-macOS platforms
+#[cfg(target_os = "macos")]
+pub fn has_accessibility_permission() -> bool {
+    macos_accessibility::is_accessibility_enabled()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn has_accessibility_permission() -> bool {
+    true // Not needed on other platforms
+}
+
+/// Request Accessibility permissions from the user (macOS only)
+/// This will show a system dialog directing them to Security & Privacy settings
+/// Returns true if permissions are already granted, false otherwise
+#[cfg(target_os = "macos")]
+pub fn request_accessibility_permission() -> bool {
+    let result = macos_accessibility::check_accessibility_with_prompt(true);
+    if result {
+        crate::log_info!("injection", "Accessibility permission granted");
+    } else {
+        crate::log_info!("injection", "Accessibility permission dialog shown, waiting for user");
+    }
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility_permission() -> bool {
+    true // Not needed on other platforms
+}
+
 /// Clipboard operations
 pub struct Clipboard;
 
@@ -186,20 +291,36 @@ impl Clipboard {
         use std::io::Write;
         use std::process::Stdio;
 
+        crate::log_debug!("injection", "Setting clipboard ({} chars)", text.len());
+
         let mut child = Command::new("pbcopy")
             .stdin(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+            .map_err(|e| {
+                crate::log_error!("injection", "Failed to spawn pbcopy: {}", e);
+                format!("Failed to set clipboard: {}", e)
+            })?;
 
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
                 .write_all(text.as_bytes())
-                .map_err(|e| format!("Failed to write to clipboard: {}", e))?;
+                .map_err(|e| {
+                    crate::log_error!("injection", "Failed to write to pbcopy: {}", e);
+                    format!("Failed to write to clipboard: {}", e)
+                })?;
         }
 
-        child
-            .wait()
-            .map_err(|e| format!("Clipboard command failed: {}", e))?;
+        let status = child.wait().map_err(|e| {
+            crate::log_error!("injection", "pbcopy failed: {}", e);
+            format!("Clipboard command failed: {}", e)
+        })?;
+
+        if !status.success() {
+            crate::log_error!("injection", "pbcopy exited with status: {}", status);
+            return Err(format!("pbcopy failed with status: {}", status));
+        }
+
+        crate::log_debug!("injection", "Clipboard set successfully");
         Ok(())
     }
 }
@@ -212,16 +333,61 @@ pub fn send_paste() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub fn send_paste() -> Result<(), String> {
-    // macOS: Use AppleScript
-    Command::new("osascript")
+    // macOS: Use AppleScript with System Events
+    // Note: This requires Accessibility permissions to be granted to the app
+
+    // Check accessibility permissions first - this will prompt the user if not granted
+    if !has_accessibility_permission() {
+        crate::log_info!("injection", "Accessibility permission not granted, requesting...");
+
+        // This will show the system dialog to request permissions
+        let granted = request_accessibility_permission();
+
+        if !granted {
+            // User needs to grant permission - the dialog has been shown
+            return Err("Accessibility permission required. Please grant permission in the dialog that appeared, then try again.".to_string());
+        }
+    }
+
+    // Send the paste command
+    let result = Command::new("osascript")
         .args([
             "-e",
             "tell application \"System Events\" to keystroke \"v\" using command down",
         ])
-        .output()
-        .map_err(|e| format!("Failed to send paste: {}", e))?;
+        .output();
 
-    Ok(())
+    match result {
+        Ok(output) => {
+            // Check for errors in stderr
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                crate::log_warn!("injection", "osascript stderr: {}", stderr);
+                // Common errors indicating permission issues:
+                // - "osascript is not allowed assistive access"
+                // - "osascript is not allowed to send keystrokes" (error 1002)
+                // - "accessibility"
+                if stderr.contains("not allowed") || stderr.contains("accessibility") || stderr.contains("1002") {
+                    crate::log_error!("injection", "Accessibility permission denied for keystroke injection");
+                    return Err("Accessibility permissions required. Please grant dybur access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string());
+                }
+                // For other errors, still fail
+                if stderr.contains("error") || stderr.contains("Error") {
+                    return Err(format!("osascript error: {}", stderr.trim()));
+                }
+            }
+
+            // Give the system time to process the keystroke
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            crate::log_debug!("injection", "Paste keystroke sent via osascript");
+            Ok(())
+        }
+        Err(e) => {
+            crate::log_error!("injection", "Failed to send paste: {}", e);
+            Err(format!("Failed to send paste: {}", e))
+        }
+    }
 }
 
 /// Injection error types
@@ -357,10 +523,13 @@ fn inject_text_internal(text: &str, restore_clipboard: bool) -> Result<(), Strin
     // Small delay to ensure clipboard is ready
     std::thread::sleep(Duration::from_millis(50));
 
-    // Send paste command
-    send_paste()?;
+    // Send paste command - if this fails, DON'T restore clipboard so user can paste manually
+    if let Err(e) = send_paste() {
+        crate::log_warn!("injection", "Paste failed, keeping text on clipboard for manual paste: {}", e);
+        return Err(e);
+    }
 
-    // Restore original clipboard if needed
+    // Only restore original clipboard if paste succeeded
     if let Some(original) = original_clipboard {
         // Wait before restoring to ensure paste completes (webviews need more time)
         std::thread::sleep(Duration::from_millis(300));

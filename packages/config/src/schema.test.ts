@@ -21,7 +21,7 @@ describe('DEFAULT_CONFIG', () => {
     assert.strictEqual(DEFAULT_CONFIG.autoPunctuation, true);
     assert.strictEqual(DEFAULT_CONFIG.sentenceCase, true);
     assert.strictEqual(DEFAULT_CONFIG.silenceTimeoutMs, 1000);
-    assert.strictEqual(DEFAULT_CONFIG.model, 'parakeet-tdt-0.6b-v3-onnx');
+    assert.strictEqual(DEFAULT_CONFIG.model, 'parakeet-tdt-v3-int8');
     assert.strictEqual(DEFAULT_CONFIG.clipboardCleanup, true);
   });
 });

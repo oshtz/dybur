@@ -17,6 +17,249 @@ import { createHash } from 'crypto';
 import { join } from 'path';
 import { getModelsDir, getModelPath } from '@dybur/config';
 
+// ============================================================================
+// Model Architecture Types
+// ============================================================================
+
+/**
+ * Speech recognition model architecture type
+ */
+export type ModelArchitecture =
+  | 'tdt_transducer'       // Parakeet v2/v3
+  | 'streaming_transducer' // Nemotron
+  | 'encoder_decoder';     // Whisper
+
+/**
+ * Vocabulary/tokenization type
+ */
+export type VocabType = 'text_file' | 'bpe';
+
+/**
+ * Role of a model file
+ */
+export type FileRole =
+  | 'encoder'
+  | 'decoder'
+  | 'decoder_with_past'
+  | 'joiner'
+  | 'vocab'
+  | 'preprocessor'
+  | 'embeddings'
+  | 'config'
+  | 'encoder_data'
+  | 'decoder_data'
+  | 'embeddings_data';
+
+/**
+ * A file that is part of a model
+ */
+export interface ModelFile {
+  name: string;
+  role: FileRole;
+  required: boolean;
+}
+
+/**
+ * Model-specific configuration
+ */
+export interface ModelConfig {
+  vocabType: VocabType;
+  sampleRate: number;
+  nMels: number;
+  supportsStreaming: boolean;
+  maxDurationS: number;
+}
+
+/**
+ * Definition of a speech recognition model
+ */
+export interface ModelDefinition {
+  id: string;
+  displayName: string;
+  description: string;
+  architecture: ModelArchitecture;
+  repo: string;
+  files: ModelFile[];
+  sizeBytes: number;
+  languages: string[];
+  isDefault: boolean;
+  config: ModelConfig;
+}
+
+// ============================================================================
+// Model Registry - All Supported Models
+// ============================================================================
+
+/**
+ * All available models
+ */
+export const MODEL_REGISTRY: ModelDefinition[] = [
+  // Parakeet TDT v2 - English only
+  {
+    id: 'parakeet-tdt-v2-int8',
+    displayName: 'Parakeet TDT v2 (English)',
+    description: 'Fast, English-optimized transducer model',
+    architecture: 'tdt_transducer',
+    repo: 'istupakov/parakeet-tdt-0.6b-v2-onnx',
+    files: [
+      { name: 'encoder-model.int8.onnx', role: 'encoder', required: true },
+      { name: 'decoder_joint-model.int8.onnx', role: 'decoder', required: true },
+      { name: 'nemo128.onnx', role: 'preprocessor', required: false },
+      { name: 'vocab.txt', role: 'vocab', required: true },
+      { name: 'config.json', role: 'config', required: false },
+    ],
+    sizeBytes: 661_000_000,
+    languages: ['en'],
+    isDefault: false,
+    config: {
+      vocabType: 'text_file',
+      sampleRate: 16000,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 1440,
+    },
+  },
+  // Parakeet TDT v3 - Multilingual (DEFAULT)
+  {
+    id: 'parakeet-tdt-v3-int8',
+    displayName: 'Parakeet TDT v3 (Multilingual)',
+    description: 'Balanced accuracy, 25 languages',
+    architecture: 'tdt_transducer',
+    repo: 'istupakov/parakeet-tdt-0.6b-v3-onnx',
+    files: [
+      { name: 'encoder-model.int8.onnx', role: 'encoder', required: true },
+      { name: 'decoder_joint-model.int8.onnx', role: 'decoder', required: true },
+      { name: 'nemo128.onnx', role: 'preprocessor', required: false },
+      { name: 'vocab.txt', role: 'vocab', required: true },
+      { name: 'config.json', role: 'config', required: false },
+    ],
+    sizeBytes: 670_000_000,
+    languages: ['en', 'de', 'es', 'fr', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'ja', 'ko', 'zh'],
+    isDefault: true,
+    config: {
+      vocabType: 'text_file',
+      sampleRate: 16000,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 1440,
+    },
+  },
+  // Nemotron Streaming - English
+  {
+    id: 'nemotron-streaming-int8',
+    displayName: 'Nemotron Streaming (English)',
+    description: 'Low-latency streaming transducer',
+    architecture: 'streaming_transducer',
+    repo: 'csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14',
+    files: [
+      { name: 'encoder.int8.onnx', role: 'encoder', required: true },
+      { name: 'decoder.int8.onnx', role: 'decoder', required: true },
+      { name: 'joiner.int8.onnx', role: 'joiner', required: true },
+      { name: 'tokens.txt', role: 'vocab', required: true },
+    ],
+    sizeBytes: 663_000_000,
+    languages: ['en'],
+    isDefault: false,
+    config: {
+      vocabType: 'text_file',
+      sampleRate: 16000,
+      nMels: 80,
+      supportsStreaming: true,
+      maxDurationS: 1440,
+    },
+  },
+  // Whisper Large v3 Turbo - INT8
+  {
+    id: 'whisper-large-v3-turbo-int8',
+    displayName: 'Whisper Large v3 Turbo (INT8)',
+    description: 'Popular model, 99 languages, balanced',
+    architecture: 'encoder_decoder',
+    repo: 'onnx-community/whisper-large-v3-turbo',
+    files: [
+      { name: 'onnx/encoder_model_int8.onnx', role: 'encoder', required: true },
+      { name: 'onnx/decoder_model_int8.onnx', role: 'decoder', required: true },
+      { name: 'tokenizer.json', role: 'vocab', required: true },
+      { name: 'config.json', role: 'config', required: false },
+      { name: 'generation_config.json', role: 'config', required: false },
+    ],
+    sizeBytes: 1_100_000_000,
+    languages: [], // All languages
+    isDefault: false,
+    config: {
+      vocabType: 'bpe',
+      sampleRate: 16000,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 30,
+    },
+  },
+  // Whisper Large v3 Turbo - FP16
+  {
+    id: 'whisper-large-v3-turbo-fp16',
+    displayName: 'Whisper Large v3 Turbo (FP16)',
+    description: 'High accuracy, 99 languages',
+    architecture: 'encoder_decoder',
+    repo: 'onnx-community/whisper-large-v3-turbo',
+    files: [
+      { name: 'onnx/encoder_model_fp16.onnx', role: 'encoder', required: true },
+      { name: 'onnx/decoder_model_fp16.onnx', role: 'decoder', required: true },
+      { name: 'tokenizer.json', role: 'vocab', required: true },
+      { name: 'config.json', role: 'config', required: false },
+      { name: 'generation_config.json', role: 'config', required: false },
+    ],
+    sizeBytes: 1_600_000_000,
+    languages: [],
+    isDefault: false,
+    config: {
+      vocabType: 'bpe',
+      sampleRate: 16000,
+      nMels: 128,
+      supportsStreaming: false,
+      maxDurationS: 30,
+    },
+  },
+];
+
+/**
+ * Get a model definition by ID
+ */
+export function getModelDefinition(modelId: string): ModelDefinition | undefined {
+  return MODEL_REGISTRY.find((m) => m.id === modelId);
+}
+
+/**
+ * Get the default model definition
+ */
+export function getDefaultModelDefinition(): ModelDefinition {
+  const defaultModel = MODEL_REGISTRY.find((m) => m.isDefault);
+  if (!defaultModel) {
+    throw new Error('No default model defined');
+  }
+  return defaultModel;
+}
+
+/**
+ * Get all available model definitions
+ */
+export function getAvailableModels(): ModelDefinition[] {
+  return MODEL_REGISTRY;
+}
+
+/**
+ * Normalize legacy model names to new IDs
+ */
+export function normalizeModelName(name: string): string {
+  const legacyMap: Record<string, string> = {
+    'parakeet-tdt-0.6b-v3-onnx': 'parakeet-tdt-v3-int8',
+    'parakeet-tdt-0.6b-v2-onnx': 'parakeet-tdt-v2-int8',
+  };
+  return legacyMap[name] ?? name;
+}
+
+// ============================================================================
+// Legacy Constants (for backward compatibility)
+// ============================================================================
+
 /**
  * Model metadata stored alongside each model
  */
@@ -27,7 +270,7 @@ export interface ModelMetadata {
   downloadedAt: string;
   size?: number;
   source?: string;
-  variant?: 'full' | 'int8';
+  variant?: string;
   files?: string[];
 }
 
@@ -48,37 +291,21 @@ export interface InstalledModel {
 export type DownloadProgress = (downloaded: number, total: number, file?: string) => void;
 
 /**
- * Default model configuration
+ * Default model ID
  */
-export const DEFAULT_MODEL = 'parakeet-tdt-0.6b-v3-onnx';
+export const DEFAULT_MODEL = 'parakeet-tdt-v3-int8';
 
 /**
- * HuggingFace model source (ONNX version for portability)
+ * Default model repository (for backward compatibility)
  */
 export const MODEL_REPO = 'istupakov/parakeet-tdt-0.6b-v3-onnx';
-export const MODEL_BASE_URL = `https://huggingface.co/${MODEL_REPO}/resolve/main`;
 
 /**
- * Model files to download
- * Using INT8 quantized version for smaller size (~670MB vs ~2.5GB)
+ * Build HuggingFace download URL
  */
-export const MODEL_FILES = {
-  full: [
-    'encoder-model.onnx',
-    'encoder-model.onnx.data',
-    'decoder_joint-model.onnx',
-    'nemo128.onnx',
-    'vocab.txt',
-    'config.json',
-  ],
-  int8: [
-    'encoder-model.int8.onnx',
-    'decoder_joint-model.int8.onnx',
-    'nemo128.onnx',
-    'vocab.txt',
-    'config.json',
-  ],
-};
+export function buildDownloadUrl(repo: string, file: string): string {
+  return `https://huggingface.co/${repo}/resolve/main/${file}`;
+}
 
 /**
  * Get the models directory, creating it if necessary
@@ -166,21 +393,46 @@ function getDirectorySize(dirPath: string): number {
  * Check if a model is installed (has all required files)
  */
 export function isModelInstalled(modelName: string): boolean {
-  const modelPath = getModelPath(modelName);
+  // Normalize legacy model names
+  const modelId = normalizeModelName(modelName);
+  const modelPath = getModelPath(modelId);
   const metadataPath = join(modelPath, 'metadata.json');
 
   if (!existsSync(modelPath) || !existsSync(metadataPath)) {
     return false;
   }
 
-  // Check for essential model files
+  // Get model definition to check required files
+  const modelDef = getModelDefinition(modelId);
+  if (modelDef) {
+    // Check all required files exist
+    for (const file of modelDef.files) {
+      if (file.required) {
+        const filePath = join(modelPath, file.name);
+        if (!existsSync(filePath)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Fallback for unknown models: check for basic files
   const hasEncoder =
     existsSync(join(modelPath, 'encoder-model.int8.onnx')) ||
-    existsSync(join(modelPath, 'encoder-model.onnx'));
+    existsSync(join(modelPath, 'encoder-model.onnx')) ||
+    existsSync(join(modelPath, 'encoder.int8.onnx')) ||
+    existsSync(join(modelPath, 'onnx/encoder_model_int8.onnx'));
   const hasDecoder =
     existsSync(join(modelPath, 'decoder_joint-model.int8.onnx')) ||
-    existsSync(join(modelPath, 'decoder_joint-model.onnx'));
-  const hasVocab = existsSync(join(modelPath, 'vocab.txt'));
+    existsSync(join(modelPath, 'decoder_joint-model.onnx')) ||
+    existsSync(join(modelPath, 'decoder.int8.onnx')) ||
+    existsSync(join(modelPath, 'onnx/decoder_model_int8.onnx')) ||
+    existsSync(join(modelPath, 'onnx/decoder_with_past_model_int8.onnx'));
+  const hasVocab =
+    existsSync(join(modelPath, 'vocab.txt')) ||
+    existsSync(join(modelPath, 'tokens.txt')) ||
+    existsSync(join(modelPath, 'tokenizer.json'));
 
   return hasEncoder && hasDecoder && hasVocab;
 }
@@ -264,57 +516,80 @@ async function downloadFile(
 
 /**
  * Download a model from HuggingFace
- * @param modelName Model name (default: parakeet-tdt-0.6b-v3-onnx)
- * @param variant 'int8' for quantized (smaller), 'full' for original
+ * @param modelId Model ID from registry (e.g., 'parakeet-tdt-v3-int8')
  * @param onProgress Progress callback
  */
 export async function downloadModel(
-  modelName: string = DEFAULT_MODEL,
-  onProgress?: DownloadProgress,
-  variant: 'full' | 'int8' = 'int8'
+  modelId: string = DEFAULT_MODEL,
+  onProgress?: DownloadProgress
 ): Promise<string> {
-  const modelDir = getModelPath(modelName);
+  // Normalize legacy model names
+  const normalizedId = normalizeModelName(modelId);
+  const modelDir = getModelPath(normalizedId);
 
   // Check if already installed
-  if (isModelInstalled(modelName)) {
+  if (isModelInstalled(normalizedId)) {
     return modelDir;
+  }
+
+  // Get model definition from registry
+  const modelDef = getModelDefinition(normalizedId);
+  if (!modelDef) {
+    throw new Error(`Unknown model: ${normalizedId}`);
   }
 
   // Create model directory
   mkdirSync(modelDir, { recursive: true });
 
-  const files = MODEL_FILES[variant];
   let totalDownloaded = 0;
   const downloadedFiles: string[] = [];
+  const totalFiles = modelDef.files.length;
 
   try {
-    for (const file of files) {
-      const url = `${MODEL_BASE_URL}/${file}`;
-      const destPath = join(modelDir, file);
+    for (let i = 0; i < modelDef.files.length; i++) {
+      const file = modelDef.files[i]!;
+      const url = buildDownloadUrl(modelDef.repo, file.name);
+      const destPath = join(modelDir, file.name);
+
+      // Create subdirectories if needed (e.g., for "onnx/encoder.onnx")
+      const pathParts = file.name.split('/').slice(0, -1);
+      if (pathParts.length > 0) {
+        const destDir = join(modelDir, ...pathParts);
+        if (!existsSync(destDir)) {
+          mkdirSync(destDir, { recursive: true });
+        }
+      }
 
       if (onProgress) {
-        onProgress(0, 0, file);
+        onProgress(0, 0, `[${i + 1}/${totalFiles}] ${file.name}`);
       }
 
       const fileSize = await downloadFile(url, destPath, (downloaded, total) => {
         if (onProgress) {
-          onProgress(downloaded, total, file);
+          onProgress(downloaded, total, `[${i + 1}/${totalFiles}] ${file.name}`);
         }
       });
 
       totalDownloaded += fileSize;
-      downloadedFiles.push(file);
+      downloadedFiles.push(file.name);
     }
+
+    // Determine version from model ID
+    const version = normalizedId.includes('v2')
+      ? 'v2'
+      : normalizedId.includes('v3')
+        ? 'v3'
+        : 'v1';
 
     // Write metadata
     const metadata: ModelMetadata = {
-      name: modelName,
-      version: 'v3',
-      checksum: '', // Would compute combined checksum if needed
+      name: normalizedId,
+      version,
+      checksum: '',
       downloadedAt: new Date().toISOString(),
       size: totalDownloaded,
-      source: MODEL_REPO,
-      variant,
+      source: modelDef.repo,
+      variant: normalizedId,
       files: downloadedFiles,
     };
 

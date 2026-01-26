@@ -7,12 +7,13 @@ Fast, local, private voice dictation for macOS and Windows.
 
 ## Features
 
-- **100% Local** - Speech recognition runs entirely on your device using [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+- **100% Local** - Speech recognition runs entirely on your device using state-of-the-art ONNX models
 - **Universal** - Inject text into any application via hotkey
 - **Private** - No cloud, no accounts, no telemetry
 - **Fast** - Sub-second transcription latency
 - **Multilingual** - Supports 25 European languages with automatic detection
 - **Smart** - Automatic punctuation and capitalization
+- **VAD** - Voice Activity Detection filters silence for better accuracy
 
 ## Installation
 
@@ -24,8 +25,30 @@ Download the latest release from [GitHub Releases](https://github.com/oshtz/dybu
 2. Focus any text field
 3. Press `Ctrl+Shift+Space` (default hotkey)
 4. Speak
-5. Press the hotkey again to stop
+5. Press the hotkey again to stop (or release if using push-to-talk mode)
 6. Text appears in the active field
+
+### Recording Modes
+
+dybur supports two recording modes:
+
+- **Toggle** (default): Press the hotkey to start recording, press again to stop
+- **Push-to-Talk**: Hold the hotkey to record, release to stop and transcribe
+
+You can switch modes from the tray menu (Recording Mode) or by editing the config file.
+
+### Voice Activity Detection (VAD)
+
+VAD automatically filters silence and background noise before transcription, improving accuracy and reducing processing time. It uses the lightweight [Silero VAD](https://github.com/snakers4/silero-vad) model (~2MB) running locally via ONNX.
+
+VAD is enabled by default. Toggle it from the tray menu or via CLI:
+
+```sh
+dybur vad          # Toggle VAD on/off
+dybur vad on       # Enable VAD
+dybur vad off      # Disable VAD
+dybur vad status   # Show VAD settings
+```
 
 All settings and controls are available from the tray menu or via CLI:
 
@@ -37,6 +60,7 @@ dybur settings    # Open config file (alias: config)
 dybur doctor      # Run diagnostics (alias: diag)
 dybur models      # Manage speech models (alias: m)
 dybur devices     # Manage input devices (alias: d)
+dybur vad         # Toggle Voice Activity Detection
 ```
 
 ## Configuration
@@ -52,17 +76,53 @@ Config file location:
   "autoPunctuation": true,
   "sentenceCase": true,
   "silenceTimeoutMs": 1000,
-  "model": "parakeet-tdt-0.6b-v3-onnx",
-  "clipboardCleanup": true
+  "model": "parakeet-tdt-v3-int8",
+  "clipboardCleanup": true,
+  "recordingMode": "toggle",
+  "vadEnabled": true,
+  "vadThreshold": 0.5,
+  "vadMinSpeechMs": 250
 }
 ```
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `hotkey` | Key combo | Global hotkey to trigger recording |
+| `autoPunctuation` | `true`/`false` | Automatically add punctuation |
+| `sentenceCase` | `true`/`false` | Capitalize first letter of sentences |
+| `silenceTimeoutMs` | Number | Silence detection timeout (ms) |
+| `model` | Model name | Speech recognition model to use |
+| `clipboardCleanup` | `true`/`false` | Restore clipboard after text injection |
+| `recordingMode` | `"toggle"`/`"push_to_talk"` | Recording behavior mode |
+| `vadEnabled` | `true`/`false` | Enable Voice Activity Detection |
+| `vadThreshold` | `0.0`-`1.0` | VAD sensitivity (higher = stricter) |
+| `vadMinSpeechMs` | Number | Minimum speech duration to keep (ms) |
+
+## Models
+
+dybur supports multiple speech recognition models. You can switch models from the tray menu or via CLI:
+
+```sh
+dybur models list      # List available models
+dybur models switch    # Select a model interactively
+```
+
+| Model | Size | Languages | Description |
+|-------|------|-----------|-------------|
+| `parakeet-tdt-v3-int8` | ~670 MB | 25 | **Default.** Multilingual transducer, balanced accuracy |
+| `parakeet-tdt-v2-int8` | ~660 MB | English | Fast English-only transducer |
+| `nemotron-streaming-int8` | ~660 MB | English | Low-latency streaming transducer |
+| `whisper-large-v3-turbo-int8` | ~1.1 GB | 99 | OpenAI Whisper, broad language support |
+| `whisper-large-v3-turbo-fp16` | ~1.6 GB | 99 | Whisper FP16, higher accuracy |
+
+Models are downloaded automatically on first use.
 
 ## Requirements
 
 - **macOS:** 10.15+ (Catalina or later)
 - **Windows:** 10/11
 - **Microphone:** Required for dictation
-- **Disk:** ~700 MB for speech model (INT8 quantized)
+- **Disk:** ~700 MB - 1.6 GB depending on speech model
 
 ### macOS Permissions
 

@@ -34,8 +34,8 @@ export interface DyburConfig {
   silenceTimeoutMs: number;
 
   /**
-   * Speech recognition model to use
-   * @default "parakeet-tdt-0.6b-v3-onnx"
+   * Speech recognition model ID to use
+   * @default "parakeet-tdt-v3-int8"
    */
   model: string;
 
@@ -51,6 +51,39 @@ export interface DyburConfig {
    * @default null
    */
   inputDevice: string | null;
+
+  /**
+   * Recording mode: "toggle" (press to start/stop) or "push_to_talk" (hold to record)
+   * @default "toggle"
+   */
+  recordingMode: 'toggle' | 'push_to_talk';
+
+  /**
+   * Enable Voice Activity Detection to filter silence before transcription
+   * @default true
+   */
+  vadEnabled: boolean;
+
+  /**
+   * VAD speech probability threshold (0.0-1.0)
+   * Higher values = more strict (fewer false positives, may miss quiet speech)
+   * @default 0.5
+   */
+  vadThreshold: number;
+
+  /**
+   * Minimum speech duration in milliseconds to keep
+   * @default 250
+   */
+  vadMinSpeechMs: number;
+
+  /**
+   * GPU acceleration mode for ONNX inference
+   * "auto" = detect and use GPU if available (DirectML on Windows, CoreML on macOS)
+   * "cpu" = force CPU-only mode (disable GPU acceleration)
+   * @default "auto"
+   */
+  gpuMode: 'auto' | 'cpu';
 }
 
 /**
@@ -61,9 +94,14 @@ export const DEFAULT_CONFIG: DyburConfig = {
   autoPunctuation: true,
   sentenceCase: true,
   silenceTimeoutMs: 1000,
-  model: 'parakeet-tdt-0.6b-v3-onnx',
+  model: 'parakeet-tdt-v3-int8',
   clipboardCleanup: true,
   inputDevice: null,
+  recordingMode: 'toggle',
+  vadEnabled: true,
+  vadThreshold: 0.5,
+  vadMinSpeechMs: 250,
+  gpuMode: 'auto',
 };
 
 /**
@@ -221,6 +259,71 @@ export function validateConfig(config: Partial<DyburConfig>): ValidationResult {
         field: 'inputDevice',
         message: 'inputDevice must be a non-empty string or null',
         value: config.inputDevice,
+      });
+    }
+  }
+
+  // Validate recordingMode
+  if (config.recordingMode !== undefined) {
+    if (config.recordingMode !== 'toggle' && config.recordingMode !== 'push_to_talk') {
+      errors.push({
+        field: 'recordingMode',
+        message: 'recordingMode must be "toggle" or "push_to_talk"',
+        value: config.recordingMode,
+      });
+    }
+  }
+
+  // Validate vadEnabled
+  if (config.vadEnabled !== undefined && typeof config.vadEnabled !== 'boolean') {
+    errors.push({
+      field: 'vadEnabled',
+      message: 'vadEnabled must be a boolean',
+      value: config.vadEnabled,
+    });
+  }
+
+  // Validate vadThreshold
+  if (config.vadThreshold !== undefined) {
+    if (typeof config.vadThreshold !== 'number') {
+      errors.push({
+        field: 'vadThreshold',
+        message: 'vadThreshold must be a number',
+        value: config.vadThreshold,
+      });
+    } else if (config.vadThreshold < 0 || config.vadThreshold > 1) {
+      errors.push({
+        field: 'vadThreshold',
+        message: 'vadThreshold must be between 0.0 and 1.0',
+        value: config.vadThreshold,
+      });
+    }
+  }
+
+  // Validate vadMinSpeechMs
+  if (config.vadMinSpeechMs !== undefined) {
+    if (typeof config.vadMinSpeechMs !== 'number') {
+      errors.push({
+        field: 'vadMinSpeechMs',
+        message: 'vadMinSpeechMs must be a number',
+        value: config.vadMinSpeechMs,
+      });
+    } else if (config.vadMinSpeechMs < 0 || config.vadMinSpeechMs > 5000) {
+      errors.push({
+        field: 'vadMinSpeechMs',
+        message: 'vadMinSpeechMs must be between 0 and 5000',
+        value: config.vadMinSpeechMs,
+      });
+    }
+  }
+
+  // Validate gpuMode
+  if (config.gpuMode !== undefined) {
+    if (config.gpuMode !== 'auto' && config.gpuMode !== 'cpu') {
+      errors.push({
+        field: 'gpuMode',
+        message: 'gpuMode must be "auto" or "cpu"',
+        value: config.gpuMode,
       });
     }
   }

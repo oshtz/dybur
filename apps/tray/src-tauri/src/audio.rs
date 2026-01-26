@@ -244,6 +244,23 @@ impl AudioCapture {
         data
     }
 
+    /// Get a clone of the buffer Arc for cross-thread access
+    pub fn get_buffer_arc(&self) -> Arc<Mutex<Vec<f32>>> {
+        Arc::clone(&self.buffer)
+    }
+
+    /// Get the sample rate (needed for resampling if retrieved from another thread)
+    pub fn get_sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Stop the stream (drops it) without returning data
+    /// Use this when retrieving data from the buffer Arc directly
+    pub fn stop_stream(&mut self) {
+        self.stream.take();
+        crate::log_info!("audio", "Audio stream stopped");
+    }
+
     /// Check if currently recording
     pub fn is_recording(&self) -> bool {
         self.stream.is_some()
@@ -446,7 +463,8 @@ fn build_input_stream_u16(
     )
 }
 
-fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+/// Resample audio from one sample rate to another using linear interpolation
+pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if input.is_empty() || in_rate == out_rate {
         return input.to_vec();
     }
