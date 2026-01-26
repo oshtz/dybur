@@ -1,6 +1,6 @@
 {
   "name": "@dybur/tray",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "dybur tray application",
   "type": "module",
