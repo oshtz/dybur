@@ -13,12 +13,7 @@ import {
   isMacOS,
   isWindows,
 } from '@dybur/config';
-import {
-  isDefaultModelInstalled,
-  getModelMetadata,
-  DEFAULT_MODEL,
-  getLogFilePath,
-} from '@dybur/core';
+import { isModelInstalled, getModelMetadata, DEFAULT_MODEL, getLogFilePath } from '@dybur/core';
 import {
   header,
   success,
@@ -90,16 +85,19 @@ function checkConfig(): DiagnosticResult {
  * Check model installation
  */
 function checkModel(): DiagnosticResult {
-  if (!isDefaultModelInstalled()) {
+  const config = loadConfig();
+  const activeModel = config.model ?? DEFAULT_MODEL;
+
+  if (!isModelInstalled(activeModel)) {
     return {
       name: 'Speech Model',
       status: 'fail',
-      message: `Model not installed`,
-      details: `Run: dybur models prefetch`,
+      message: `Model not installed: ${activeModel}`,
+      details: `Run: dybur models download ${activeModel}`,
     };
   }
 
-  const metadata = getModelMetadata(DEFAULT_MODEL);
+  const metadata = getModelMetadata(activeModel);
 
   if (!metadata) {
     return {
@@ -112,7 +110,7 @@ function checkModel(): DiagnosticResult {
   return {
     name: 'Speech Model',
     status: 'pass',
-    message: DEFAULT_MODEL,
+    message: activeModel,
     details: `${metadata.variant ?? 'full'} variant, downloaded ${metadata.downloadedAt.split('T')[0]}`,
   };
 }

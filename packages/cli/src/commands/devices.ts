@@ -16,7 +16,6 @@ import {
   brand,
   cyan,
   dim,
-  green,
   yellow,
   icons,
   select,
@@ -203,20 +202,18 @@ async function listCommand(): Promise<void> {
   const choices = [
     {
       label: 'System default',
-      value: null as string | null,
+      value: '__default__',
       hint: 'use OS default microphone',
     },
     ...devices.map((device) => ({
       label: device.name,
-      value: device.name as string | null,
+      value: device.name,
       hint: device.isDefault ? 'system default' : undefined,
     })),
   ];
 
   // Find current selection index
-  const currentIndex = currentDevice
-    ? choices.findIndex((c) => c.value === currentDevice)
-    : 0;
+  const currentIndex = currentDevice ? choices.findIndex((c) => c.value === currentDevice) : 0;
 
   const selected = await select({
     message: 'Select input device',
@@ -225,14 +222,14 @@ async function listCommand(): Promise<void> {
   });
 
   // User cancelled
-  if (selected === undefined) {
+  if (selected === null) {
     info('Selection cancelled');
     console.log('');
     return;
   }
 
   // Apply selection
-  if (selected === null) {
+  if (selected === '__default__') {
     // Reset to system default
     updateConfig({ inputDevice: null });
     success('Input device reset to system default');
@@ -317,11 +314,12 @@ export async function devicesCommand(args: string[]): Promise<void> {
       break;
 
     case 'set':
-    case 's':
+    case 's': {
       // Join remaining args in case device name has spaces and wasn't quoted
       const deviceName = args.slice(1).join(' ');
       await setCommand(deviceName);
       break;
+    }
 
     case 'reset':
     case 'default':

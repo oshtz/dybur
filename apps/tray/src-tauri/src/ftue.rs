@@ -6,13 +6,16 @@
 //! - Model download
 //! - First dictation tutorial
 
-use crate::config::{get_config_path, get_data_dir, DyburConfig, load_config};
-use crate::models::{is_default_model_installed, download_model_sync, DEFAULT_MODEL};
 use crate::audio::list_input_devices;
+use crate::config::{get_data_dir, load_config, save_config, DyburConfig};
+use crate::models::{
+    download_model_sync, format_bytes, get_available_models, get_model_definition,
+    is_default_model_installed, is_model_installed, normalize_model_name, DEFAULT_MODEL,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// FTUE state persisted to disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +82,21 @@ pub struct DownloadProgress {
     pub file_total_bytes: u64,
 }
 
+/// Model option shown in FTUE
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FtueModel {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub size: String,
+    pub languages: Vec<String>,
+    pub supports_streaming: bool,
+    pub installed: bool,
+    pub is_default: bool,
+    pub current: bool,
+}
+
 /// Get the FTUE state file path
 pub fn get_ftue_state_path() -> PathBuf {
     get_data_dir().join("ftue-state.json")
@@ -110,8 +128,7 @@ pub fn save_ftue_state(state: &FtueState) -> Result<(), String> {
     let content = serde_json::to_string_pretty(state)
         .map_err(|e| format!("Failed to serialize FTUE state: {}", e))?;
 
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write FTUE state: {}", e))
+    fs::write(&path, content).map_err(|e| format!("Failed to write FTUE state: {}", e))
 }
 
 /// Check if FTUE should be shown
@@ -123,8 +140,12 @@ pub fn should_show_ftue() -> bool {
         return false;
     }
 
-    // Show if model is not installed (main reason for FTUE)
-    if !is_default_model_installed() {
+    let active_model = load_config()
+        .map(|config| normalize_model_name(&config.model).to_string())
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+    // Show if the configured model is not installed (main reason for FTUE)
+    if !is_model_installed(&active_model) {
         return true;
     }
 
@@ -274,6 +295,33 @@ fn check_internet() -> CheckResult {
     }
 }
 
+fn save_active_model(model_id: &str) -> Result<(), String> {
+    let mut config = load_config()?;
+    config.model = model_id.to_string();
+    save_config(&config)
+}
+
+fn load_selected_model(model_id: &str) {
+    // Load the model so users can dictate immediately without restarting.
+    if let Some(stt_config) = crate::stt::get_model_paths(model_id) {
+        let gpu_preference = load_config()
+            .map(|c| crate::execution_providers::parse_gpu_preference(&c.gpu_mode))
+            .unwrap_or(crate::execution_providers::GpuPreference::Auto);
+
+        let mut engine = crate::STT_ENGINE.lock().unwrap();
+        match engine.load(stt_config, gpu_preference) {
+            Ok(()) => {
+                crate::log_info!("ftue", "STT model '{}' loaded and ready", model_id);
+            }
+            Err(e) => {
+                crate::log_error!("ftue", "Failed to load STT model '{}': {}", model_id, e);
+            }
+        }
+    } else {
+        crate::log_warn!("ftue", "Model paths missing after selecting '{}'", model_id);
+    }
+}
+
 // Tauri Commands
 
 /// Get the current configuration for FTUE
@@ -282,15 +330,48 @@ pub fn ftue_get_config() -> Result<DyburConfig, String> {
     load_config()
 }
 
+/// Get available model options for FTUE
+#[tauri::command]
+pub fn ftue_get_models() -> Vec<FtueModel> {
+    let current_model = load_config()
+        .map(|config| normalize_model_name(&config.model).to_string())
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+    get_available_models()
+        .iter()
+        .map(|model| FtueModel {
+            id: model.id.to_string(),
+            display_name: model.display_name.to_string(),
+            description: model.description.to_string(),
+            size: format_bytes(model.size_bytes),
+            languages: model
+                .languages
+                .iter()
+                .map(|language| language.to_string())
+                .collect(),
+            supports_streaming: model.config.supports_streaming,
+            installed: is_model_installed(model.id),
+            is_default: model.is_default,
+            current: model.id == current_model,
+        })
+        .collect()
+}
+
 /// Get the current platform
 #[tauri::command]
 pub fn ftue_get_platform() -> String {
     #[cfg(target_os = "windows")]
-    { "windows".to_string() }
+    {
+        "windows".to_string()
+    }
     #[cfg(target_os = "macos")]
-    { "macos".to_string() }
+    {
+        "macos".to_string()
+    }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    { "unknown".to_string() }
+    {
+        "unknown".to_string()
+    }
 }
 
 /// Run system checks and return results directly
@@ -301,19 +382,35 @@ pub fn ftue_run_system_check() -> SystemCheckResults {
 
 /// Start model download
 #[tauri::command]
-pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
+pub async fn ftue_start_download(app: AppHandle, model_id: Option<String>) -> Result<(), String> {
     use crate::state::{DownloadState, DOWNLOAD_STATE};
 
+    let selected_model = model_id
+        .map(|model| normalize_model_name(&model).to_string())
+        .or_else(|| {
+            load_config()
+                .ok()
+                .map(|config| normalize_model_name(&config.model).to_string())
+        })
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+    if get_model_definition(&selected_model).is_none() {
+        return Err(format!("Unknown model: {}", selected_model));
+    }
+
     // Check if already installed
-    if is_default_model_installed() {
+    if is_model_installed(&selected_model) {
+        save_active_model(&selected_model)?;
+        load_selected_model(&selected_model);
         let _ = app.emit_to("ftue", "ftue:download-complete", ());
         return Ok(());
     }
 
-    crate::log_info!("ftue", "Starting model download...");
+    crate::log_info!("ftue", "Starting model download: {}", selected_model);
 
     // Start download in background thread
     let app_handle = app.clone();
+    let selected_model_for_thread = selected_model.clone();
     std::thread::spawn(move || {
         // Emit progress updates in a separate thread that polls the state
         let progress_app = app_handle.clone();
@@ -335,7 +432,8 @@ pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
                         } else {
                             0.0
                         };
-                        let overall_progress = ((*file_index as f32 + file_progress) / *total_files as f32) * 100.0;
+                        let overall_progress =
+                            ((*file_index as f32 + file_progress) / *total_files as f32) * 100.0;
 
                         // Format status with file size
                         let status = if *file_total_bytes > 0 {
@@ -375,7 +473,11 @@ pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
                     }
                     DownloadState::Failed { error, .. } => {
                         crate::log_error!("ftue", "Download failed: {}", error);
-                        let _ = progress_app.emit_to("ftue", "ftue:download-error", serde_json::json!({ "error": error }));
+                        let _ = progress_app.emit_to(
+                            "ftue",
+                            "ftue:download-error",
+                            serde_json::json!({ "error": error }),
+                        );
                         break;
                     }
                     DownloadState::Idle => {}
@@ -385,27 +487,14 @@ pub async fn ftue_start_download(app: AppHandle) -> Result<(), String> {
         });
 
         // Actually download the model
-        match download_model_sync(DEFAULT_MODEL, "int8") {
+        match download_model_sync(&selected_model_for_thread, "int8") {
             Ok(_) => {
                 crate::log_info!("ftue", "Model download completed");
 
-                // Load the model so user can dictate immediately without restart
-                if let Some(stt_config) = crate::stt::get_model_paths(DEFAULT_MODEL) {
-                    // Get GPU preference from config
-                    let gpu_preference = load_config()
-                        .map(|c| crate::execution_providers::parse_gpu_preference(&c.gpu_mode))
-                        .unwrap_or(crate::execution_providers::GpuPreference::Auto);
-
-                    let mut engine = crate::STT_ENGINE.lock().unwrap();
-                    match engine.load(stt_config, gpu_preference) {
-                        Ok(()) => {
-                            crate::log_info!("ftue", "STT model loaded and ready");
-                        }
-                        Err(e) => {
-                            crate::log_error!("ftue", "Failed to load STT model after download: {}", e);
-                        }
-                    }
+                if let Err(e) = save_active_model(&selected_model_for_thread) {
+                    crate::log_error!("ftue", "Failed to save selected model: {}", e);
                 }
+                load_selected_model(&selected_model_for_thread);
             }
             Err(e) => {
                 crate::log_error!("ftue", "Model download failed: {}", e);
@@ -436,14 +525,18 @@ pub fn ftue_skip() -> Result<(), String> {
 /// Check if the default model is already installed
 #[tauri::command]
 pub fn ftue_check_model_installed() -> bool {
-    is_default_model_installed()
+    load_config()
+        .map(|config| is_model_installed(&config.model))
+        .unwrap_or_else(|_| is_default_model_installed())
 }
 
 /// Close FTUE window
 #[tauri::command]
 pub fn ftue_close(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("ftue") {
-        window.close().map_err(|e| format!("Failed to close FTUE window: {}", e))?;
+        window
+            .close()
+            .map_err(|e| format!("Failed to close FTUE window: {}", e))?;
     }
     Ok(())
 }
@@ -465,20 +558,18 @@ pub fn show_ftue_window(app: &AppHandle) -> Result<(), String> {
     }
 
     // Create FTUE window
-    let window = WebviewWindowBuilder::new(
-        app,
-        "ftue",
-        WebviewUrl::App("ftue.html".into()),
-    )
-    .title("Welcome to dybur")
-    .inner_size(550.0, 700.0)
-    .resizable(false)
-    .center()
-    .decorations(true)
-    .build()
-    .map_err(|e| format!("Failed to create FTUE window: {}", e))?;
+    let window = WebviewWindowBuilder::new(app, "ftue", WebviewUrl::App("ftue.html".into()))
+        .title("Welcome to dybur")
+        .inner_size(550.0, 700.0)
+        .resizable(false)
+        .center()
+        .decorations(true)
+        .build()
+        .map_err(|e| format!("Failed to create FTUE window: {}", e))?;
 
-    window.show().map_err(|e| format!("Failed to show FTUE window: {}", e))?;
+    window
+        .show()
+        .map_err(|e| format!("Failed to show FTUE window: {}", e))?;
 
     crate::log_info!("ftue", "FTUE window opened");
 

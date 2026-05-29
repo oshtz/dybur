@@ -11,8 +11,12 @@ import {
   writeFileSync,
   rmSync,
   chmodSync,
+  mkdtempSync,
+  readdirSync,
+  cpSync,
 } from 'fs';
 import { join } from 'path';
+import { tmpdir } from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
@@ -52,7 +56,7 @@ export const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
  * Current tray app version to download
  * Update this when releasing new versions
  */
-export const TRAY_APP_VERSION = 'v1.0.0';
+export const TRAY_APP_VERSION = 'v1.2.1';
 
 /**
  * Get the expected asset name for the current platform
@@ -62,10 +66,10 @@ export function getTrayAssetName(): string {
   const arch = getArch();
 
   if (platform === 'darwin') {
-    return `dybur-macos-${arch}.tar.gz`;
+    return `dybur-macos-${arch}.dmg`;
   }
 
-  return `dybur-windows-${arch}.zip`;
+  return `dybur-windows-${arch}.exe`;
 }
 
 /**
@@ -142,7 +146,7 @@ async function downloadFile(
   let downloaded = 0;
 
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -162,21 +166,44 @@ async function downloadFile(
   }
 }
 
-/**
- * Extract a tar.gz archive (macOS)
- */
-async function extractTarGz(archivePath: string, destDir: string): Promise<void> {
-  await execAsync(`tar -xzf "${archivePath}" -C "${destDir}"`);
+function quotePosixPath(path: string): string {
+  return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
 /**
- * Extract a zip archive (Windows)
+ * Install a macOS .app bundle from a DMG into the dybur CLI bin directory.
  */
-async function extractZip(archivePath: string, destDir: string): Promise<void> {
-  // Use PowerShell's Expand-Archive on Windows
-  await execAsync(
-    `powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`
-  );
+async function installDmg(dmgPath: string, bundlePath: string): Promise<void> {
+  const mountPoint = mkdtempSync(join(tmpdir(), 'dybur-dmg-'));
+  let mounted = false;
+
+  try {
+    await execAsync(
+      `hdiutil attach ${quotePosixPath(dmgPath)} -mountpoint ${quotePosixPath(
+        mountPoint
+      )} -nobrowse -readonly -quiet`
+    );
+    mounted = true;
+
+    const appName = readdirSync(mountPoint).find((name) => name.endsWith('.app'));
+    if (!appName) {
+      throw new Error('DMG did not contain a .app bundle');
+    }
+
+    cpSync(join(mountPoint, appName), bundlePath, { recursive: true });
+  } finally {
+    if (mounted) {
+      try {
+        await execAsync(`hdiutil detach ${quotePosixPath(mountPoint)} -quiet`);
+      } catch {
+        await execAsync(`hdiutil detach ${quotePosixPath(mountPoint)} -force -quiet`).catch(
+          () => undefined
+        );
+      }
+    }
+
+    rmSync(mountPoint, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -199,49 +226,56 @@ export async function downloadTrayApp(
 
   const downloadUrl = getTrayDownloadUrl(version);
   const assetName = getTrayAssetName();
-  const archivePath = join(binDir, assetName);
+  const directExecutable = assetName.endsWith('.exe');
+  const installerPath = join(binDir, assetName);
+  const downloadPath = directExecutable ? trayPath : installerPath;
 
   try {
-    // Download the archive
+    // Download the platform artifact
     if (onProgress) {
       onProgress(0, 0, 'Downloading tray application...');
     }
 
-    await downloadFile(downloadUrl, archivePath, (downloaded, total) => {
+    await downloadFile(downloadUrl, downloadPath, (downloaded, total) => {
       if (onProgress) {
         onProgress(downloaded, total);
       }
     });
 
-    // Extract the archive
-    if (onProgress) {
-      onProgress(0, 0, 'Extracting...');
-    }
-
-    if (isMacOS()) {
-      await extractTarGz(archivePath, binDir);
-
-      // Make the binary executable
-      if (existsSync(trayPath)) {
-        chmodSync(trayPath, 0o755);
+    if (!directExecutable) {
+      if (onProgress) {
+        onProgress(0, 0, 'Installing...');
       }
 
-      // Remove quarantine attribute on macOS
-      try {
-        await execAsync(`xattr -rd com.apple.quarantine "${bundlePath}"`);
-      } catch {
-        // Ignore if xattr fails (attribute might not exist)
+      if (isMacOS()) {
+        await installDmg(installerPath, bundlePath);
+
+        // Make the binary executable
+        if (existsSync(trayPath)) {
+          chmodSync(trayPath, 0o755);
+        }
+
+        // Remove quarantine attribute on macOS
+        try {
+          await execAsync(`xattr -rd com.apple.quarantine ${quotePosixPath(bundlePath)}`);
+        } catch {
+          // Ignore if xattr fails (attribute might not exist)
+        }
+      } else {
+        throw new Error(`Unsupported tray app asset type: ${assetName}`);
       }
-    } else {
-      await extractZip(archivePath, binDir);
+
+      // Clean up the downloaded installer
+      rmSync(installerPath, { force: true });
     }
 
-    // Clean up the archive
-    rmSync(archivePath, { force: true });
+    if (directExecutable) {
+      chmodSync(trayPath, 0o755);
+    }
 
-    // Verify extraction
+    // Verify installation
     if (!existsSync(trayPath)) {
-      throw new Error('Extraction failed: tray app binary not found');
+      throw new Error('Installation failed: tray app binary not found');
     }
 
     // Write metadata
@@ -258,8 +292,8 @@ export async function downloadTrayApp(
     return trayPath;
   } catch (error) {
     // Clean up on failure
-    if (existsSync(archivePath)) {
-      rmSync(archivePath, { force: true });
+    if (existsSync(downloadPath)) {
+      rmSync(downloadPath, { force: true });
     }
     if (existsSync(bundlePath)) {
       rmSync(bundlePath, { recursive: true, force: true });

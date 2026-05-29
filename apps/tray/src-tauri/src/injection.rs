@@ -104,7 +104,10 @@ pub fn request_accessibility_permission() -> bool {
     if result {
         crate::log_info!("injection", "Accessibility permission granted");
     } else {
-        crate::log_info!("injection", "Accessibility permission dialog shown, waiting for user");
+        crate::log_info!(
+            "injection",
+            "Accessibility permission dialog shown, waiting for user"
+        );
     }
     result
 }
@@ -124,10 +127,15 @@ pub struct Clipboard;
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         VK_CONTROL, VK_V,
@@ -262,6 +270,41 @@ mod windows_impl {
             Ok(())
         }
     }
+
+    /// Detect whether the focused UI Automation element is a password field.
+    pub fn is_secure_input_active() -> Result<bool, String> {
+        unsafe {
+            let com_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninitialize = com_init.is_ok();
+            if com_init.is_err() {
+                crate::log_warn!(
+                    "injection",
+                    "COM initialization for secure input detection failed: {:?}",
+                    com_init
+                );
+            }
+
+            let result = (|| {
+                let automation: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|e| format!("Failed to create UI Automation instance: {}", e))?;
+                let focused = automation
+                    .GetFocusedElement()
+                    .map_err(|e| format!("Failed to read focused UI element: {}", e))?;
+                let is_password = focused
+                    .CurrentIsPassword()
+                    .map_err(|e| format!("Failed to read password field state: {}", e))?;
+
+                Ok(is_password.as_bool())
+            })();
+
+            if should_uninitialize {
+                CoUninitialize();
+            }
+
+            result
+        }
+    }
 }
 
 impl Clipboard {
@@ -302,12 +345,10 @@ impl Clipboard {
             })?;
 
         if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|e| {
-                    crate::log_error!("injection", "Failed to write to pbcopy: {}", e);
-                    format!("Failed to write to clipboard: {}", e)
-                })?;
+            stdin.write_all(text.as_bytes()).map_err(|e| {
+                crate::log_error!("injection", "Failed to write to pbcopy: {}", e);
+                format!("Failed to write to clipboard: {}", e)
+            })?;
         }
 
         let status = child.wait().map_err(|e| {
@@ -338,7 +379,10 @@ pub fn send_paste() -> Result<(), String> {
 
     // Check accessibility permissions first - this will prompt the user if not granted
     if !has_accessibility_permission() {
-        crate::log_info!("injection", "Accessibility permission not granted, requesting...");
+        crate::log_info!(
+            "injection",
+            "Accessibility permission not granted, requesting..."
+        );
 
         // This will show the system dialog to request permissions
         let granted = request_accessibility_permission();
@@ -367,8 +411,14 @@ pub fn send_paste() -> Result<(), String> {
                 // - "osascript is not allowed assistive access"
                 // - "osascript is not allowed to send keystrokes" (error 1002)
                 // - "accessibility"
-                if stderr.contains("not allowed") || stderr.contains("accessibility") || stderr.contains("1002") {
-                    crate::log_error!("injection", "Accessibility permission denied for keystroke injection");
+                if stderr.contains("not allowed")
+                    || stderr.contains("accessibility")
+                    || stderr.contains("1002")
+                {
+                    crate::log_error!(
+                        "injection",
+                        "Accessibility permission denied for keystroke injection"
+                    );
                     return Err("Accessibility permissions required. Please grant dybur access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string());
                 }
                 // For other errors, still fail
@@ -430,11 +480,17 @@ impl From<InjectionError> for String {
 /// This uses platform-specific accessibility APIs to detect secure inputs.
 #[cfg(target_os = "windows")]
 pub fn is_secure_input_active() -> bool {
-    // On Windows, detecting password fields reliably requires UI Automation
-    // which is complex and slow via PowerShell. For now, we skip this check.
-    // Users should be aware not to use dictation in password fields.
-    // TODO: Implement native UI Automation check if needed
-    false
+    match windows_impl::is_secure_input_active() {
+        Ok(is_secure) => is_secure,
+        Err(error) => {
+            crate::log_warn!(
+                "injection",
+                "Secure input detection failed; allowing injection: {}",
+                error
+            );
+            false
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -525,7 +581,11 @@ fn inject_text_internal(text: &str, restore_clipboard: bool) -> Result<(), Strin
 
     // Send paste command - if this fails, DON'T restore clipboard so user can paste manually
     if let Err(e) = send_paste() {
-        crate::log_warn!("injection", "Paste failed, keeping text on clipboard for manual paste: {}", e);
+        crate::log_warn!(
+            "injection",
+            "Paste failed, keeping text on clipboard for manual paste: {}",
+            e
+        );
         return Err(e);
     }
 

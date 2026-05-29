@@ -128,7 +128,11 @@ impl VadEngine {
     }
 
     /// Load VAD model from path
-    pub fn load(&mut self, model_path: PathBuf, gpu_preference: GpuPreference) -> Result<(), VadError> {
+    pub fn load(
+        &mut self,
+        model_path: PathBuf,
+        gpu_preference: GpuPreference,
+    ) -> Result<(), VadError> {
         self.last_error = None;
 
         if !model_path.exists() {
@@ -142,20 +146,29 @@ impl VadEngine {
 
         // Load ONNX session with GPU support
         let session_config = SessionConfig::for_vad().with_gpu_preference(gpu_preference);
-        let (session, ep_result) = build_session(&model_path, &session_config)
-            .map_err(|e| {
-                let err = VadError::ModelLoadFailed(e.to_string());
-                self.state = VadState::Error;
-                self.last_error = Some(err.clone());
-                err
-            })?;
+        let (session, ep_result) = build_session(&model_path, &session_config).map_err(|e| {
+            let err = VadError::ModelLoadFailed(e.to_string());
+            self.state = VadState::Error;
+            self.last_error = Some(err.clone());
+            err
+        })?;
 
         // Log model inputs and outputs for debugging
         for input in session.inputs() {
-            crate::log_debug!("vad", "Model input '{}' => {:?}", input.name(), input.dtype());
+            crate::log_debug!(
+                "vad",
+                "Model input '{}' => {:?}",
+                input.name(),
+                input.dtype()
+            );
         }
         for output in session.outputs() {
-            crate::log_debug!("vad", "Model output '{}' => {:?}", output.name(), output.dtype());
+            crate::log_debug!(
+                "vad",
+                "Model output '{}' => {:?}",
+                output.name(),
+                output.dtype()
+            );
         }
 
         self.session = Some(session);
@@ -216,14 +229,16 @@ impl VadEngine {
         let sr_scalar = arr0(SAMPLE_RATE);
 
         // Create tensor refs from views
-        let input_tensor = TensorRef::from_array_view(input_array.view())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to create input tensor: {}", e)))?;
+        let input_tensor = TensorRef::from_array_view(input_array.view()).map_err(|e| {
+            VadError::InferenceFailed(format!("Failed to create input tensor: {}", e))
+        })?;
 
         let sr_tensor = TensorRef::from_array_view(sr_scalar.view())
             .map_err(|e| VadError::InferenceFailed(format!("Failed to create sr tensor: {}", e)))?;
 
-        let state_tensor = TensorRef::from_array_view(self.rnn_state.view())
-            .map_err(|e| VadError::InferenceFailed(format!("Failed to create state tensor: {}", e)))?;
+        let state_tensor = TensorRef::from_array_view(self.rnn_state.view()).map_err(|e| {
+            VadError::InferenceFailed(format!("Failed to create state tensor: {}", e))
+        })?;
 
         // Run inference
         let outputs = session
@@ -238,8 +253,9 @@ impl VadEngine {
         self.context = input_with_context[CHUNK_SIZE..].to_vec();
 
         // Extract output probability
-        let output = outputs.get("output")
-            .ok_or_else(|| VadError::InferenceFailed("Missing 'output' in model outputs".to_string()))?;
+        let output = outputs.get("output").ok_or_else(|| {
+            VadError::InferenceFailed("Missing 'output' in model outputs".to_string())
+        })?;
 
         let (_, output_data) = output
             .try_extract_tensor::<f32>()
@@ -248,8 +264,9 @@ impl VadEngine {
         let prob = output_data[0];
 
         // Extract and update LSTM state
-        let state_n = outputs.get("stateN")
-            .ok_or_else(|| VadError::InferenceFailed("Missing 'stateN' in model outputs".to_string()))?;
+        let state_n = outputs.get("stateN").ok_or_else(|| {
+            VadError::InferenceFailed("Missing 'stateN' in model outputs".to_string())
+        })?;
 
         let (state_shape, state_data) = state_n
             .try_extract_tensor::<f32>()
@@ -265,7 +282,10 @@ impl VadEngine {
     /// Detect speech segments in audio buffer
     ///
     /// Returns list of (start_sample, end_sample) tuples for speech regions
-    pub fn detect_speech_segments(&mut self, audio: &[f32]) -> Result<Vec<SpeechSegment>, VadError> {
+    pub fn detect_speech_segments(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<Vec<SpeechSegment>, VadError> {
         if !self.is_ready() {
             return Err(VadError::NotLoaded);
         }
@@ -290,7 +310,14 @@ impl VadEngine {
         let audio_min = audio.iter().cloned().fold(f32::INFINITY, f32::min);
         let audio_max = audio.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let audio_rms: f32 = (audio.iter().map(|x| x * x).sum::<f32>() / audio.len() as f32).sqrt();
-        crate::log_debug!("vad", "Audio stats: {} samples, min={:.4}, max={:.4}, rms={:.4}", audio.len(), audio_min, audio_max, audio_rms);
+        crate::log_debug!(
+            "vad",
+            "Audio stats: {} samples, min={:.4}, max={:.4}, rms={:.4}",
+            audio.len(),
+            audio_min,
+            audio_max,
+            audio_rms
+        );
 
         for i in 0..num_chunks {
             let start = i * CHUNK_SIZE;
@@ -301,7 +328,14 @@ impl VadEngine {
 
             // Log first 10 chunks for debugging
             if i < 10 {
-                crate::log_debug!("vad", "Chunk {}: prob={:.4}, threshold={:.2}, is_speech={}", i, prob, threshold, is_speech);
+                crate::log_debug!(
+                    "vad",
+                    "Chunk {}: prob={:.4}, threshold={:.2}, is_speech={}",
+                    i,
+                    prob,
+                    threshold,
+                    is_speech
+                );
             }
 
             if is_speech {

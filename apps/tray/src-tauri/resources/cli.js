@@ -26,7 +26,8 @@ var DEFAULT_CONFIG = {
   vadEnabled: true,
   vadThreshold: 0.5,
   vadMinSpeechMs: 250,
-  gpuMode: "auto"
+  gpuMode: "auto",
+  streamingEnabled: true
 };
 var VALID_MODIFIERS = ["Ctrl", "Alt", "Shift", "Meta", "Cmd", "Win"];
 function validateHotkey(hotkey) {
@@ -194,6 +195,13 @@ function validateConfig(config) {
       });
     }
   }
+  if (config.streamingEnabled !== void 0 && typeof config.streamingEnabled !== "boolean") {
+    errors.push({
+      field: "streamingEnabled",
+      message: "streamingEnabled must be a boolean",
+      value: config.streamingEnabled
+    });
+  }
   return {
     valid: errors.length === 0,
     errors
@@ -209,8 +217,8 @@ function mergeWithDefaults(userConfig, onWarning) {
     }
   }
   if (onWarning) {
-    for (const error3 of validation.errors) {
-      onWarning(error3.field, `${error3.message}. Using default value.`);
+    for (const error2 of validation.errors) {
+      onWarning(error2.field, `${error2.message}. Using default value.`);
     }
   }
   return result;
@@ -312,8 +320,8 @@ function loadConfig(options = {}) {
       try {
         saveConfig(DEFAULT_CONFIG, { path, logger });
         logger.debug(`Created default config at ${path}`);
-      } catch (error3) {
-        logger.warn(`Failed to create default config: ${error3}`);
+      } catch (error2) {
+        logger.warn(`Failed to create default config: ${error2}`);
       }
     }
     return { ...DEFAULT_CONFIG };
@@ -322,11 +330,11 @@ function loadConfig(options = {}) {
   try {
     const content = readFileSync(path, "utf-8");
     userConfig = JSON.parse(content);
-  } catch (error3) {
-    if (error3 instanceof SyntaxError) {
-      logger.error(`Invalid JSON in config file: ${error3.message}`);
+  } catch (error2) {
+    if (error2 instanceof SyntaxError) {
+      logger.error(`Invalid JSON in config file: ${error2.message}`);
     } else {
-      logger.error(`Failed to read config file: ${error3}`);
+      logger.error(`Failed to read config file: ${error2}`);
     }
     logger.warn("Using default configuration");
     return { ...DEFAULT_CONFIG };
@@ -348,16 +356,16 @@ function saveConfig(config, options = {}) {
     try {
       mkdirSync(dir, { recursive: true });
       logger.debug(`Created config directory: ${dir}`);
-    } catch (error3) {
-      throw new Error(`Failed to create config directory: ${error3}`);
+    } catch (error2) {
+      throw new Error(`Failed to create config directory: ${error2}`);
     }
   }
   try {
     const content = JSON.stringify(config, null, 2);
     writeFileSync(path, content, "utf-8");
     logger.debug(`Saved config to ${path}`);
-  } catch (error3) {
-    throw new Error(`Failed to write config file: ${error3}`);
+  } catch (error2) {
+    throw new Error(`Failed to write config file: ${error2}`);
   }
 }
 function updateConfig(updates, options = {}) {
@@ -365,8 +373,8 @@ function updateConfig(updates, options = {}) {
   const currentConfig = loadConfig(options);
   const validation = validateConfig(updates);
   if (!validation.valid) {
-    for (const error3 of validation.errors) {
-      logger.warn(`Ignoring invalid update for ${error3.field}: ${error3.message}`);
+    for (const error2 of validation.errors) {
+      logger.warn(`Ignoring invalid update for ${error2.field}: ${error2.message}`);
     }
   }
   const invalidFields = new Set(validation.errors.map((e) => e.field));
@@ -609,9 +617,6 @@ function isModelInstalled(modelName) {
   const hasVocab = existsSync2(join2(modelPath, "vocab.txt")) || existsSync2(join2(modelPath, "tokens.txt")) || existsSync2(join2(modelPath, "tokenizer.json"));
   return hasEncoder && hasDecoder && hasVocab;
 }
-function isDefaultModelInstalled() {
-  return isModelInstalled(DEFAULT_MODEL);
-}
 function getModelMetadata(modelName) {
   const metadataPath = join2(getModelPath(modelName), "metadata.json");
   if (!existsSync2(metadataPath)) {
@@ -636,7 +641,7 @@ async function downloadFile(url, destPath, onProgress) {
   const fileStream = createWriteStream(destPath);
   let downloaded = 0;
   try {
-    while (true) {
+    for (; ; ) {
       const { done, value } = await reader.read();
       if (done)
         break;
@@ -701,9 +706,9 @@ async function downloadModel(modelId = DEFAULT_MODEL, onProgress) {
     };
     writeFileSync2(join2(modelDir, "metadata.json"), JSON.stringify(metadata, null, 2));
     return modelDir;
-  } catch (error3) {
+  } catch (error2) {
     rmSync(modelDir, { recursive: true, force: true });
-    throw error3;
+    throw error2;
   }
 }
 function removeModel(modelName) {
@@ -717,8 +722,9 @@ function removeModel(modelName) {
 function cleanModels() {
   const models = listModels();
   const removed = [];
+  const activeModel = normalizeModelName(loadConfig({ createIfMissing: false }).model ?? DEFAULT_MODEL);
   for (const model of models) {
-    if (!model.isDefault) {
+    if (!model.isDefault && normalizeModelName(model.name) !== activeModel) {
       if (removeModel(model.name)) {
         removed.push(model.name);
       }
@@ -834,21 +840,22 @@ var loggers = {
 };
 
 // ../core/dist/tray.js
-import { createWriteStream as createWriteStream2, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3, rmSync as rmSync2, chmodSync } from "fs";
+import { createWriteStream as createWriteStream2, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3, rmSync as rmSync2, chmodSync, mkdtempSync, readdirSync as readdirSync2, cpSync } from "fs";
 import { join as join3 } from "path";
+import { tmpdir } from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
 var execAsync = promisify(exec);
 var GITHUB_REPO = "oshtz/dybur";
 var GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
-var TRAY_APP_VERSION = "v1.0.0";
+var TRAY_APP_VERSION = "v1.2.1";
 function getTrayAssetName() {
   const platform2 = getPlatform();
   const arch = getArch();
   if (platform2 === "darwin") {
-    return `dybur-macos-${arch}.tar.gz`;
+    return `dybur-macos-${arch}.dmg`;
   }
-  return `dybur-windows-${arch}.zip`;
+  return `dybur-windows-${arch}.exe`;
 }
 function getTrayDownloadUrl(version = TRAY_APP_VERSION) {
   const assetName = getTrayAssetName();
@@ -879,7 +886,7 @@ async function downloadFile2(url, destPath, onProgress) {
   const fileStream = createWriteStream2(destPath);
   let downloaded = 0;
   try {
-    while (true) {
+    for (; ; ) {
       const { done, value } = await reader.read();
       if (done)
         break;
@@ -897,11 +904,30 @@ async function downloadFile2(url, destPath, onProgress) {
     });
   }
 }
-async function extractTarGz(archivePath, destDir) {
-  await execAsync(`tar -xzf "${archivePath}" -C "${destDir}"`);
+function quotePosixPath(path) {
+  return `'${path.replace(/'/g, "'\\''")}'`;
 }
-async function extractZip(archivePath, destDir) {
-  await execAsync(`powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`);
+async function installDmg(dmgPath, bundlePath) {
+  const mountPoint = mkdtempSync(join3(tmpdir(), "dybur-dmg-"));
+  let mounted = false;
+  try {
+    await execAsync(`hdiutil attach ${quotePosixPath(dmgPath)} -mountpoint ${quotePosixPath(mountPoint)} -nobrowse -readonly -quiet`);
+    mounted = true;
+    const appName = readdirSync2(mountPoint).find((name) => name.endsWith(".app"));
+    if (!appName) {
+      throw new Error("DMG did not contain a .app bundle");
+    }
+    cpSync(join3(mountPoint, appName), bundlePath, { recursive: true });
+  } finally {
+    if (mounted) {
+      try {
+        await execAsync(`hdiutil detach ${quotePosixPath(mountPoint)} -quiet`);
+      } catch {
+        await execAsync(`hdiutil detach ${quotePosixPath(mountPoint)} -force -quiet`).catch(() => void 0);
+      }
+    }
+    rmSync2(mountPoint, { recursive: true, force: true });
+  }
 }
 async function downloadTrayApp(version = TRAY_APP_VERSION, onProgress) {
   const platform2 = getPlatform();
@@ -914,34 +940,41 @@ async function downloadTrayApp(version = TRAY_APP_VERSION, onProgress) {
   }
   const downloadUrl = getTrayDownloadUrl(version);
   const assetName = getTrayAssetName();
-  const archivePath = join3(binDir, assetName);
+  const directExecutable = assetName.endsWith(".exe");
+  const installerPath = join3(binDir, assetName);
+  const downloadPath = directExecutable ? trayPath : installerPath;
   try {
     if (onProgress) {
       onProgress(0, 0, "Downloading tray application...");
     }
-    await downloadFile2(downloadUrl, archivePath, (downloaded, total) => {
+    await downloadFile2(downloadUrl, downloadPath, (downloaded, total) => {
       if (onProgress) {
         onProgress(downloaded, total);
       }
     });
-    if (onProgress) {
-      onProgress(0, 0, "Extracting...");
-    }
-    if (isMacOS()) {
-      await extractTarGz(archivePath, binDir);
-      if (existsSync4(trayPath)) {
-        chmodSync(trayPath, 493);
+    if (!directExecutable) {
+      if (onProgress) {
+        onProgress(0, 0, "Installing...");
       }
-      try {
-        await execAsync(`xattr -rd com.apple.quarantine "${bundlePath}"`);
-      } catch {
+      if (isMacOS()) {
+        await installDmg(installerPath, bundlePath);
+        if (existsSync4(trayPath)) {
+          chmodSync(trayPath, 493);
+        }
+        try {
+          await execAsync(`xattr -rd com.apple.quarantine ${quotePosixPath(bundlePath)}`);
+        } catch {
+        }
+      } else {
+        throw new Error(`Unsupported tray app asset type: ${assetName}`);
       }
-    } else {
-      await extractZip(archivePath, binDir);
+      rmSync2(installerPath, { force: true });
     }
-    rmSync2(archivePath, { force: true });
+    if (directExecutable) {
+      chmodSync(trayPath, 493);
+    }
     if (!existsSync4(trayPath)) {
-      throw new Error("Extraction failed: tray app binary not found");
+      throw new Error("Installation failed: tray app binary not found");
     }
     const metadata = {
       version,
@@ -952,14 +985,14 @@ async function downloadTrayApp(version = TRAY_APP_VERSION, onProgress) {
     };
     writeFileSync3(join3(binDir, "tray-metadata.json"), JSON.stringify(metadata, null, 2));
     return trayPath;
-  } catch (error3) {
-    if (existsSync4(archivePath)) {
-      rmSync2(archivePath, { force: true });
+  } catch (error2) {
+    if (existsSync4(downloadPath)) {
+      rmSync2(downloadPath, { force: true });
     }
     if (existsSync4(bundlePath)) {
       rmSync2(bundlePath, { recursive: true, force: true });
     }
-    throw error3;
+    throw error2;
   }
 }
 
@@ -1307,7 +1340,10 @@ function isTrayAppRunning() {
     return false;
   }
   try {
-    const result = execSync("pgrep -x dybur", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    const result = execSync("pgrep -x dybur", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
     return result.trim().length > 0;
   } catch {
     return false;
@@ -1347,14 +1383,15 @@ async function startCommand(_args) {
   keyValue("Model", config.model);
   keyValue("Hotkey", brand.accent(config.hotkey));
   console.log("");
-  if (!isDefaultModelInstalled()) {
-    warning("Default model not found");
+  const modelId = config.model ?? DEFAULT_MODEL;
+  if (!isModelInstalled(modelId)) {
+    warning(`Model not found: ${modelId}`);
     info("Downloading model from HuggingFace...");
     console.log(`  ${dim("This only needs to happen once")}`);
     console.log("");
     let lastFile = "";
     try {
-      await downloadModel(DEFAULT_MODEL, (downloaded, total, file) => {
+      await downloadModel(modelId, (downloaded, total, file) => {
         if (file && file !== lastFile) {
           if (lastFile) {
             process.stdout.write("\n");
@@ -1373,7 +1410,7 @@ async function startCommand(_args) {
     } catch (err) {
       console.log("\n");
       error(`Failed to download model: ${err}`);
-      info(`Run ${cyan("dybur models prefetch")} to try again`);
+      info(`Run ${cyan(`dybur models download ${modelId}`)} to try again`);
       process.exit(1);
     }
   }
@@ -1408,7 +1445,9 @@ async function startCommand(_args) {
       console.log("");
       info("You can try:");
       console.log(`  ${dim("1.")} Check your internet connection`);
-      console.log(`  ${dim("2.")} Download manually from ${cyan("https://github.com/oshtz/dybur/releases")}`);
+      console.log(
+        `  ${dim("2.")} Download manually from ${cyan("https://github.com/oshtz/dybur/releases")}`
+      );
       console.log(`  ${dim("3.")} Build from source: ${cyan("cd apps/tray && pnpm tauri build")}`);
       process.exit(1);
     }
@@ -1487,16 +1526,17 @@ function statusIcon(ok) {
 }
 async function statusCommand(_args) {
   header("dybur Status");
-  const running = await isTrayRunning();
-  const modelInstalled = isDefaultModelInstalled();
-  const modelMeta = modelInstalled ? getModelMetadata(DEFAULT_MODEL) : null;
   const config = loadConfig({ createIfMissing: false });
+  const activeModel = config.model ?? DEFAULT_MODEL;
+  const running = await isTrayRunning();
+  const modelInstalled = isModelInstalled(activeModel);
+  const modelMeta = modelInstalled ? getModelMetadata(activeModel) : null;
   const paths = getAllPaths();
   console.log(
     `  ${statusIcon(running)} ${dim("Service:")}     ${running ? green("Running") : red("Stopped")}`
   );
   console.log(
-    `  ${statusIcon(modelInstalled)} ${dim("Model:")}       ${modelInstalled ? green(DEFAULT_MODEL) : red("Not installed")}`
+    `  ${statusIcon(modelInstalled)} ${dim("Model:")}       ${modelInstalled ? green(activeModel) : red(`${activeModel} not installed`)}`
   );
   if (modelMeta) {
     console.log(`              ${dim("Downloaded:")} ${modelMeta.downloadedAt.split("T")[0]}`);
@@ -1516,7 +1556,9 @@ async function statusCommand(_args) {
     `  ${dim("Sentence case:")} ${config.sentenceCase ? green("enabled") : dim("disabled")}`
   );
   console.log(`  ${dim("Silence timeout:")} ${config.silenceTimeoutMs}ms`);
-  console.log(`  ${dim("Recording mode:")} ${config.recordingMode === "push_to_talk" ? "push-to-talk" : "toggle"}`);
+  console.log(
+    `  ${dim("Recording mode:")} ${config.recordingMode === "push_to_talk" ? "push-to-talk" : "toggle"}`
+  );
   console.log("");
   divider();
   console.log("");
@@ -1531,7 +1573,7 @@ async function statusCommand(_args) {
     success(`Ready ${dim("- press")} ${brand.accent(config.hotkey)} ${dim("to dictate")}`);
   } else if (!modelInstalled) {
     warning("Model required");
-    info(`Run ${cyan("dybur models prefetch")} to download`);
+    info(`Run ${cyan(`dybur models download ${activeModel}`)} to download`);
   } else {
     warning("Service not running");
     info(`Run ${cyan("dybur start")} to begin`);
@@ -1566,6 +1608,7 @@ async function settingsCommand(args) {
     keyValue("Clipboard cleanup", config.clipboardCleanup ? "enabled" : "disabled");
     keyValue("Recording mode", config.recordingMode === "push_to_talk" ? "push-to-talk" : "toggle");
     keyValue("VAD (silence filter)", config.vadEnabled ? "enabled" : "disabled");
+    keyValue("Streaming preview", config.streamingEnabled ? "enabled" : "disabled");
     if (config.vadEnabled) {
       keyValue("  VAD threshold", `${config.vadThreshold}`);
       keyValue("  VAD min speech", `${config.vadMinSpeechMs}ms`);
@@ -1634,15 +1677,17 @@ function checkConfig() {
   }
 }
 function checkModel() {
-  if (!isDefaultModelInstalled()) {
+  const config = loadConfig();
+  const activeModel = config.model ?? DEFAULT_MODEL;
+  if (!isModelInstalled(activeModel)) {
     return {
       name: "Speech Model",
       status: "fail",
-      message: `Model not installed`,
-      details: `Run: dybur models prefetch`
+      message: `Model not installed: ${activeModel}`,
+      details: `Run: dybur models download ${activeModel}`
     };
   }
-  const metadata = getModelMetadata(DEFAULT_MODEL);
+  const metadata = getModelMetadata(activeModel);
   if (!metadata) {
     return {
       name: "Speech Model",
@@ -1653,7 +1698,7 @@ function checkModel() {
   return {
     name: "Speech Model",
     status: "pass",
-    message: DEFAULT_MODEL,
+    message: activeModel,
     details: `${metadata.variant ?? "full"} variant, downloaded ${metadata.downloadedAt.split("T")[0]}`
   };
 }
@@ -1813,7 +1858,9 @@ async function doctorCommand(_args) {
 // src/commands/models.ts
 function showModelsHelp() {
   header("Model Management");
-  console.log(`  ${dim("dybur supports multiple STT models with different accuracy/speed tradeoffs.")}`);
+  console.log(
+    `  ${dim("dybur supports multiple STT models with different accuracy/speed tradeoffs.")}`
+  );
   console.log(`  ${dim("Models are downloaded from HuggingFace.")}`);
   console.log("");
   divider();
@@ -1829,7 +1876,9 @@ function showModelsHelp() {
   console.log(`  ${brand.accent("Examples")}`);
   console.log(`  ${cyan("dybur m d")}                    ${dim("Interactive model download")}`);
   console.log(`  ${cyan("dybur m s")}                    ${dim("Interactive model selection")}`);
-  console.log(`  ${cyan("dybur m d whisper-large-v3-turbo-int8")}  ${dim("Download specific model")}`);
+  console.log(
+    `  ${cyan("dybur m d whisper-large-v3-turbo-int8")}  ${dim("Download specific model")}`
+  );
   console.log("");
   const defaultModel = getDefaultModelDefinition();
   console.log(`  ${brand.accent("Default Model")}`);
@@ -1886,7 +1935,7 @@ async function listCommand(showAvailable = false) {
     info("No models installed");
     console.log("");
     console.log(`  ${dim("To install the default model:")}`);
-    console.log(`  ${cyan("dybur models prefetch")}`);
+    console.log(`  ${cyan(`dybur models download ${DEFAULT_MODEL}`)}`);
     console.log("");
     console.log(`  ${dim("To see all available models:")}`);
     console.log(`  ${cyan("dybur models list --available")}`);
@@ -1958,7 +2007,7 @@ async function selectModelForDownload() {
     choices,
     initial: 0
   });
-  if (selected === void 0 || selected === "__separator__") {
+  if (selected === null || selected === "__separator__") {
     return void 0;
   }
   return selected;
@@ -2060,7 +2109,7 @@ async function selectModelForSet() {
     choices,
     initial: currentIndex >= 0 ? currentIndex : 0
   });
-  return selected;
+  return selected ?? void 0;
 }
 async function setCommand(modelId) {
   header("Set Active Model");
@@ -2130,20 +2179,23 @@ async function modelsCommand(args) {
   const subcommand = args[0];
   switch (subcommand) {
     case "list":
-    case "l":
+    case "l": {
       const showAvailable = args.includes("--available") || args.includes("-a");
       await listCommand(showAvailable);
       break;
+    }
     case "download":
-    case "d":
+    case "d": {
       const downloadModelId = args[1];
       await downloadCommand(downloadModelId);
       break;
+    }
     case "set":
-    case "s":
+    case "s": {
       const setModelId = args[1];
       await setCommand(setModelId);
       break;
+    }
     case "prefetch":
       await prefetchCommand();
       break;
@@ -2294,7 +2346,7 @@ async function listCommand2() {
   const choices = [
     {
       label: "System default",
-      value: null,
+      value: "__default__",
       hint: "use OS default microphone"
     },
     ...devices.map((device) => ({
@@ -2309,12 +2361,12 @@ async function listCommand2() {
     choices,
     initial: currentIndex >= 0 ? currentIndex : 0
   });
-  if (selected === void 0) {
+  if (selected === null) {
     info("Selection cancelled");
     console.log("");
     return;
   }
-  if (selected === null) {
+  if (selected === "__default__") {
     updateConfig({ inputDevice: null });
     success("Input device reset to system default");
   } else {
@@ -2376,10 +2428,11 @@ async function devicesCommand(args) {
       await listCommand2();
       break;
     case "set":
-    case "s":
+    case "s": {
       const deviceName = args.slice(1).join(" ");
       await setCommand2(deviceName);
       break;
+    }
     case "reset":
     case "default":
     case "r":
@@ -2400,6 +2453,53 @@ async function devicesCommand(args) {
 }
 
 // src/commands/vad.ts
+function parseNumber(value, label) {
+  if (value === void 0) {
+    error(`${label} value is required`);
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    error(`${label} must be a number`);
+    return null;
+  }
+  return parsed;
+}
+function setThreshold(config, value) {
+  const threshold = parseNumber(value, "Threshold");
+  if (threshold === null) return;
+  if (threshold < 0 || threshold > 1) {
+    error("Threshold must be between 0.0 and 1.0");
+    return;
+  }
+  config.vadThreshold = threshold;
+  saveConfig(config);
+  success(`VAD threshold set to ${threshold}`);
+  info("Higher values are stricter and may ignore quieter speech");
+}
+function setMinSpeech(config, value) {
+  const duration = parseNumber(value, "Minimum speech duration");
+  if (duration === null) return;
+  if (duration < 0 || duration > 5e3) {
+    error("Minimum speech duration must be between 0 and 5000ms");
+    return;
+  }
+  config.vadMinSpeechMs = duration;
+  saveConfig(config);
+  success(`VAD minimum speech duration set to ${duration}ms`);
+}
+function setSilenceTimeout(config, value) {
+  const timeout = parseNumber(value, "Silence timeout");
+  if (timeout === null) return;
+  if (timeout < 0 || timeout > 3e4) {
+    error("Silence timeout must be between 0 and 30000ms");
+    return;
+  }
+  config.silenceTimeoutMs = timeout;
+  saveConfig(config);
+  success(`Silence timeout set to ${timeout}ms`);
+  info("This controls how long a pause can split speech segments");
+}
 async function vadCommand(args) {
   const config = loadConfig();
   const subcommand = args[0]?.toLowerCase();
@@ -2421,6 +2521,18 @@ async function vadCommand(args) {
     showStatus(config);
     return;
   }
+  if (subcommand === "threshold") {
+    setThreshold(config, args[1]);
+    return;
+  }
+  if (subcommand === "min-speech" || subcommand === "min") {
+    setMinSpeech(config, args[1]);
+    return;
+  }
+  if (subcommand === "silence" || subcommand === "silence-timeout") {
+    setSilenceTimeout(config, args[1]);
+    return;
+  }
   if (!subcommand) {
     config.vadEnabled = !config.vadEnabled;
     saveConfig(config);
@@ -2435,6 +2547,7 @@ function showStatus(config) {
   keyValue("Status", config.vadEnabled ? brand.accent("enabled") : dim("disabled"));
   keyValue("Threshold", `${config.vadThreshold}`);
   keyValue("Min speech duration", `${config.vadMinSpeechMs}ms`);
+  keyValue("Silence timeout", `${config.silenceTimeoutMs}ms`);
   console.log("");
   console.log(`  ${dim("VAD filters silence and noise before transcription.")}`);
   console.log(`  ${dim("This improves accuracy and reduces processing time.")}`);
@@ -2446,6 +2559,9 @@ function showHelp() {
   console.log(`  ${brand.accent("dybur vad on")}       Enable VAD`);
   console.log(`  ${brand.accent("dybur vad off")}      Disable VAD`);
   console.log(`  ${brand.accent("dybur vad status")}   Show VAD settings`);
+  console.log(`  ${brand.accent("dybur vad threshold 0.6")}      Set speech threshold`);
+  console.log(`  ${brand.accent("dybur vad min-speech 250")}     Set minimum speech duration`);
+  console.log(`  ${brand.accent("dybur vad silence 1000")}       Set silence timeout`);
   console.log("");
   info("VAD (Voice Activity Detection) filters silence before transcription");
   console.log("");
@@ -2509,7 +2625,7 @@ function showHelp2() {
 }
 
 // src/cli.ts
-var VERSION = "1.0.0";
+var VERSION = "1.2.1";
 function showHelp3() {
   banner();
   console.log(`  ${dim("Local voice dictation for macOS & Windows")}`);
@@ -2523,18 +2639,23 @@ function showHelp3() {
   command("doctor, diag", "Run diagnostics");
   command("models, m", "Manage speech models");
   command("devices, d", "Manage input devices");
-  command("vad", "Toggle Voice Activity Detection");
+  command("vad", "Tune Voice Activity Detection");
   command("gpu", "Toggle GPU acceleration");
   console.log("");
   header("Model Commands");
   command("models list", "List installed models");
-  command("models prefetch", "Download default model");
+  command("models download <model-id>", "Download a speech model");
   command("models clean", "Remove unused models");
   console.log("");
   header("Device Commands");
   command("d, d l", "List & select microphone interactively");
   command("d set <name>", "Select a specific microphone");
   command("d reset", "Reset to system default");
+  console.log("");
+  header("VAD Commands");
+  command("vad status", "Show VAD settings");
+  command("vad threshold 0.6", "Set speech sensitivity");
+  command("vad silence 1000", "Set silence split timeout");
   console.log("");
   header("Options");
   command("-h, --help", "Show this help message");

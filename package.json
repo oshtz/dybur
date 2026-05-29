@@ -1,15 +1,16 @@
 {
   "name": "dybur-monorepo",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "Fast, local, private voice dictation",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "lint": "eslint packages apps --ext .ts,.tsx",
-    "format": "prettier --write \"packages/**/*.ts\" \"apps/**/*.ts\"",
-    "typecheck": "pnpm -r typecheck"
+    "lint": "eslint \"packages/**/*.ts\"",
+    "format": "prettier --write \"packages/**/*.ts\"",
+    "typecheck": "pnpm --filter @dybur/config build && pnpm --filter @dybur/core build && pnpm -r typecheck",
+    "eval:asr": "node scripts/asr-eval.js"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

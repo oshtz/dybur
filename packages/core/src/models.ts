@@ -15,7 +15,7 @@ import {
 } from 'fs';
 import { createHash } from 'crypto';
 import { join } from 'path';
-import { getModelsDir, getModelPath } from '@dybur/config';
+import { getModelsDir, getModelPath, loadConfig } from '@dybur/config';
 
 // ============================================================================
 // Model Architecture Types
@@ -25,9 +25,9 @@ import { getModelsDir, getModelPath } from '@dybur/config';
  * Speech recognition model architecture type
  */
 export type ModelArchitecture =
-  | 'tdt_transducer'       // Parakeet v2/v3
+  | 'tdt_transducer' // Parakeet v2/v3
   | 'streaming_transducer' // Nemotron
-  | 'encoder_decoder';     // Whisper
+  | 'encoder_decoder'; // Whisper
 
 /**
  * Vocabulary/tokenization type
@@ -496,7 +496,7 @@ async function downloadFile(
   let downloaded = 0;
 
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -575,11 +575,7 @@ export async function downloadModel(
     }
 
     // Determine version from model ID
-    const version = normalizedId.includes('v2')
-      ? 'v2'
-      : normalizedId.includes('v3')
-        ? 'v3'
-        : 'v1';
+    const version = normalizedId.includes('v2') ? 'v2' : normalizedId.includes('v3') ? 'v3' : 'v1';
 
     // Write metadata
     const metadata: ModelMetadata = {
@@ -623,9 +619,12 @@ export function removeModel(modelName: string): boolean {
 export function cleanModels(): string[] {
   const models = listModels();
   const removed: string[] = [];
+  const activeModel = normalizeModelName(
+    loadConfig({ createIfMissing: false }).model ?? DEFAULT_MODEL
+  );
 
   for (const model of models) {
-    if (!model.isDefault) {
+    if (!model.isDefault && normalizeModelName(model.name) !== activeModel) {
       if (removeModel(model.name)) {
         removed.push(model.name);
       }

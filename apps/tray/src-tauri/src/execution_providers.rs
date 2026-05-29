@@ -89,10 +89,13 @@ pub fn build_session(
             .with_intra_threads(config.intra_threads)?
             .commit_from_file(model_path)?;
 
-        return Ok((session, ExecutionProviderResult {
-            provider_name: "CPU".to_string(),
-            is_gpu: false,
-        }));
+        return Ok((
+            session,
+            ExecutionProviderResult {
+                provider_name: "CPU".to_string(),
+                is_gpu: false,
+            },
+        ));
     }
 
     // Try GPU provider based on platform
@@ -108,15 +111,21 @@ pub fn build_session(
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        crate::log_info!("ort", "No GPU providers available for this platform, using CPU");
+        crate::log_info!(
+            "ort",
+            "No GPU providers available for this platform, using CPU"
+        );
         let session = Session::builder()?
             .with_intra_threads(config.intra_threads)?
             .commit_from_file(model_path)?;
 
-        Ok((session, ExecutionProviderResult {
-            provider_name: "CPU".to_string(),
-            is_gpu: false,
-        }))
+        Ok((
+            session,
+            ExecutionProviderResult {
+                provider_name: "CPU".to_string(),
+                is_gpu: false,
+            },
+        ))
     }
 }
 
@@ -139,23 +148,33 @@ fn build_session_windows(
     match dml_result {
         Ok(session) => {
             crate::log_info!("ort", "DirectML execution provider registered successfully");
-            Ok((session, ExecutionProviderResult {
-                provider_name: "DirectML".to_string(),
-                is_gpu: true,
-            }))
+            Ok((
+                session,
+                ExecutionProviderResult {
+                    provider_name: "DirectML".to_string(),
+                    is_gpu: true,
+                },
+            ))
         }
         Err(e) => {
-            crate::log_warn!("ort", "DirectML registration failed: {}, falling back to CPU", e);
+            crate::log_warn!(
+                "ort",
+                "DirectML registration failed: {}; continuing on CPU. Use `dybur gpu off` to disable GPU attempts or update the GPU driver/runtime.",
+                e
+            );
 
             // Fall back to CPU
             let session = Session::builder()?
                 .with_intra_threads(config.intra_threads)?
                 .commit_from_file(model_path)?;
 
-            Ok((session, ExecutionProviderResult {
-                provider_name: "CPU".to_string(),
-                is_gpu: false,
-            }))
+            Ok((
+                session,
+                ExecutionProviderResult {
+                    provider_name: "CPU".to_string(),
+                    is_gpu: false,
+                },
+            ))
         }
     }
 }
@@ -179,23 +198,33 @@ fn build_session_macos(
     match coreml_result {
         Ok(session) => {
             crate::log_info!("ort", "CoreML execution provider registered successfully");
-            Ok((session, ExecutionProviderResult {
-                provider_name: "CoreML".to_string(),
-                is_gpu: true,
-            }))
+            Ok((
+                session,
+                ExecutionProviderResult {
+                    provider_name: "CoreML".to_string(),
+                    is_gpu: true,
+                },
+            ))
         }
         Err(e) => {
-            crate::log_warn!("ort", "CoreML registration failed: {}, falling back to CPU", e);
+            crate::log_warn!(
+                "ort",
+                "CoreML registration failed: {}; continuing on CPU. Use `dybur gpu off` to disable GPU attempts or keep `dybur gpu on` to retry after OS/runtime updates.",
+                e
+            );
 
             // Fall back to CPU
             let session = Session::builder()?
                 .with_intra_threads(config.intra_threads)?
                 .commit_from_file(model_path)?;
 
-            Ok((session, ExecutionProviderResult {
-                provider_name: "CPU".to_string(),
-                is_gpu: false,
-            }))
+            Ok((
+                session,
+                ExecutionProviderResult {
+                    provider_name: "CPU".to_string(),
+                    is_gpu: false,
+                },
+            ))
         }
     }
 }
@@ -224,7 +253,10 @@ pub fn parse_gpu_preference(mode: &str) -> GpuPreference {
         #[cfg(target_os = "macos")]
         "auto" => {
             // On macOS, default to CPU due to CoreML compatibility issues with many models
-            crate::log_info!("ort", "macOS detected, defaulting to CPU (CoreML has compatibility issues)");
+            crate::log_info!(
+                "ort",
+                "macOS detected, defaulting to CPU (CoreML has compatibility issues)"
+            );
             GpuPreference::CpuOnly
         }
         _ => GpuPreference::Auto, // "auto" on Windows, or any other value
