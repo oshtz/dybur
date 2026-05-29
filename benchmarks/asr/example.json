@@ -1,0 +1,44 @@
+{
+  "samples": [
+    {
+      "id": "short-email",
+      "audio": "samples/short-email.wav",
+      "reference": "Please send the meeting notes to everyone before lunch.",
+      "durationMs": 4200,
+      "tags": ["english", "email"]
+    },
+    {
+      "id": "punctuation-note",
+      "audio": "samples/punctuation-note.wav",
+      "reference": "Remember to call Maya tomorrow morning and ask about the invoice.",
+      "durationMs": 5100,
+      "tags": ["english", "notes"]
+    }
+  ],
+  "runs": [
+    {
+      "model": "parakeet-tdt-v3-int8",
+      "sampleId": "short-email",
+      "hypothesis": "please send the meeting notes to everyone before lunch",
+      "latencyMs": 820
+    },
+    {
+      "model": "parakeet-tdt-v3-int8",
+      "sampleId": "punctuation-note",
+      "hypothesis": "remember to call maya tomorrow morning and ask about the invoice",
+      "latencyMs": 910
+    },
+    {
+      "model": "nemotron-streaming-int8",
+      "sampleId": "short-email",
+      "hypothesis": "please send the meeting notes everyone before lunch",
+      "latencyMs": 690
+    },
+    {
+      "model": "nemotron-streaming-int8",
+      "sampleId": "punctuation-note",
+      "hypothesis": "remember to call maya tomorrow morning and ask about invoice",
+      "latencyMs": 740
+    }
+  ]
+}

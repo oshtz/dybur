@@ -14,6 +14,11 @@ describe('DEFAULT_CONFIG', () => {
     assert.strictEqual(typeof DEFAULT_CONFIG.silenceTimeoutMs, 'number');
     assert.strictEqual(typeof DEFAULT_CONFIG.model, 'string');
     assert.strictEqual(typeof DEFAULT_CONFIG.clipboardCleanup, 'boolean');
+    assert.strictEqual(typeof DEFAULT_CONFIG.vadEnabled, 'boolean');
+    assert.strictEqual(typeof DEFAULT_CONFIG.vadThreshold, 'number');
+    assert.strictEqual(typeof DEFAULT_CONFIG.vadMinSpeechMs, 'number');
+    assert.strictEqual(typeof DEFAULT_CONFIG.gpuMode, 'string');
+    assert.strictEqual(typeof DEFAULT_CONFIG.streamingEnabled, 'boolean');
   });
 
   it('has sensible default values', () => {
@@ -23,6 +28,11 @@ describe('DEFAULT_CONFIG', () => {
     assert.strictEqual(DEFAULT_CONFIG.silenceTimeoutMs, 1000);
     assert.strictEqual(DEFAULT_CONFIG.model, 'parakeet-tdt-v3-int8');
     assert.strictEqual(DEFAULT_CONFIG.clipboardCleanup, true);
+    assert.strictEqual(DEFAULT_CONFIG.vadEnabled, true);
+    assert.strictEqual(DEFAULT_CONFIG.vadThreshold, 0.5);
+    assert.strictEqual(DEFAULT_CONFIG.vadMinSpeechMs, 250);
+    assert.strictEqual(DEFAULT_CONFIG.gpuMode, 'auto');
+    assert.strictEqual(DEFAULT_CONFIG.streamingEnabled, true);
   });
 });
 
@@ -115,6 +125,31 @@ describe('validateConfig', () => {
     it('rejects empty model names', () => {
       const result = validateConfig({ model: '' });
       assert.strictEqual(result.valid, false);
+    });
+  });
+
+  describe('VAD validation', () => {
+    it('accepts boundary VAD values', () => {
+      for (const vadThreshold of [0, 0.5, 1]) {
+        const result = validateConfig({ vadThreshold });
+        assert.strictEqual(result.valid, true, `Expected threshold ${vadThreshold} to be valid`);
+      }
+
+      for (const vadMinSpeechMs of [0, 250, 5000]) {
+        const result = validateConfig({ vadMinSpeechMs });
+        assert.strictEqual(
+          result.valid,
+          true,
+          `Expected min speech ${vadMinSpeechMs}ms to be valid`
+        );
+      }
+    });
+
+    it('rejects out-of-range VAD values', () => {
+      assert.strictEqual(validateConfig({ vadThreshold: -0.1 }).valid, false);
+      assert.strictEqual(validateConfig({ vadThreshold: 1.1 }).valid, false);
+      assert.strictEqual(validateConfig({ vadMinSpeechMs: -1 }).valid, false);
+      assert.strictEqual(validateConfig({ vadMinSpeechMs: 5001 }).valid, false);
     });
   });
 });

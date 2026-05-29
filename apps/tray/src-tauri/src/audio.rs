@@ -130,7 +130,7 @@ impl AudioCapture {
     }
 
     /// Start capturing audio with improved error handling
-    /// 
+    ///
     /// # Arguments
     /// * `device_name` - Optional device name to use. If None, uses system default.
     pub fn start(&mut self, device_name: Option<&str>) -> Result<(), AudioError> {
@@ -331,7 +331,10 @@ fn select_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamCon
         let format_penalty = sample_format_rank(config.sample_format());
         let score = (rate_diff, channel_penalty, format_penalty);
 
-        if best.as_ref().map_or(true, |(_, best_score)| score < *best_score) {
+        if best
+            .as_ref()
+            .map_or(true, |(_, best_score)| score < *best_score)
+        {
             best = Some((config, score));
         }
     }
@@ -340,9 +343,9 @@ fn select_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamCon
         return Ok(config);
     }
 
-    device.default_input_config().map_err(|e| {
-        AudioError::StreamError(format!("Failed to get default input config: {}", e))
-    })
+    device
+        .default_input_config()
+        .map_err(|e| AudioError::StreamError(format!("Failed to get default input config: {}", e)))
 }
 
 fn clamp_sample_rate(min: u32, max: u32, target: u32) -> u32 {
@@ -370,8 +373,7 @@ fn build_input_stream_f32(
     channels: u16,
     buffer: Arc<Mutex<Vec<f32>>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
-{
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = channels as usize;
 
     device.build_input_stream(
@@ -525,7 +527,7 @@ pub fn has_input_device() -> bool {
 /// Returns None if not found
 pub fn find_input_device_by_name(name: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    
+
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(device_name) = device.name() {
@@ -535,7 +537,7 @@ pub fn find_input_device_by_name(name: &str) -> Option<cpal::Device> {
             }
         }
     }
-    
+
     None
 }
 
@@ -543,7 +545,7 @@ pub fn find_input_device_by_name(name: &str) -> Option<cpal::Device> {
 /// Returns an error if no device is available
 pub fn get_input_device(device_name: Option<&str>) -> Result<cpal::Device, AudioError> {
     let host = cpal::default_host();
-    
+
     if let Some(name) = device_name {
         // Try to find the specified device
         if let Some(device) = find_input_device_by_name(name) {
@@ -557,7 +559,7 @@ pub fn get_input_device(device_name: Option<&str>) -> Result<cpal::Device, Audio
             );
         }
     }
-    
+
     // Fall back to default device
     host.default_input_device().ok_or_else(|| {
         let err = AudioError::NoInputDevice;

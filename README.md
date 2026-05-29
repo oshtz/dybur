@@ -3,7 +3,7 @@
 Fast, local, private voice dictation for macOS and Windows.
 
 > Talk into any text field. Instantly. Without cloud, accounts, or privacy trade-offs.
-[dybur.com](https://dybur.com)
+> [dybur.com](https://dybur.com)
 
 ## Features
 
@@ -48,6 +48,9 @@ dybur vad          # Toggle VAD on/off
 dybur vad on       # Enable VAD
 dybur vad off      # Disable VAD
 dybur vad status   # Show VAD settings
+dybur vad threshold 0.6   # Set speech sensitivity (0.0-1.0)
+dybur vad min-speech 250  # Set minimum speech duration in ms
+dybur vad silence 1000    # Set silence split timeout in ms
 ```
 
 All settings and controls are available from the tray menu or via CLI:
@@ -78,25 +81,31 @@ Config file location:
   "silenceTimeoutMs": 1000,
   "model": "parakeet-tdt-v3-int8",
   "clipboardCleanup": true,
+  "inputDevice": null,
   "recordingMode": "toggle",
   "vadEnabled": true,
   "vadThreshold": 0.5,
-  "vadMinSpeechMs": 250
+  "vadMinSpeechMs": 250,
+  "gpuMode": "auto",
+  "streamingEnabled": true
 }
 ```
 
-| Option | Values | Description |
-|--------|--------|-------------|
-| `hotkey` | Key combo | Global hotkey to trigger recording |
-| `autoPunctuation` | `true`/`false` | Automatically add punctuation |
-| `sentenceCase` | `true`/`false` | Capitalize first letter of sentences |
-| `silenceTimeoutMs` | Number | Silence detection timeout (ms) |
-| `model` | Model name | Speech recognition model to use |
-| `clipboardCleanup` | `true`/`false` | Restore clipboard after text injection |
-| `recordingMode` | `"toggle"`/`"push_to_talk"` | Recording behavior mode |
-| `vadEnabled` | `true`/`false` | Enable Voice Activity Detection |
-| `vadThreshold` | `0.0`-`1.0` | VAD sensitivity (higher = stricter) |
-| `vadMinSpeechMs` | Number | Minimum speech duration to keep (ms) |
+| Option             | Values                      | Description                                                     |
+| ------------------ | --------------------------- | --------------------------------------------------------------- |
+| `hotkey`           | Key combo                   | Global hotkey to trigger recording                              |
+| `autoPunctuation`  | `true`/`false`              | Automatically add punctuation                                   |
+| `sentenceCase`     | `true`/`false`              | Capitalize first letter of sentences                            |
+| `silenceTimeoutMs` | Number                      | Minimum silence duration used to split VAD speech segments (ms) |
+| `model`            | Model name                  | Speech recognition model to use                                 |
+| `clipboardCleanup` | `true`/`false`              | Restore clipboard after text injection                          |
+| `inputDevice`      | Device name or `null`       | Microphone to use; `null` uses the system default               |
+| `recordingMode`    | `"toggle"`/`"push_to_talk"` | Recording behavior mode                                         |
+| `vadEnabled`       | `true`/`false`              | Enable Voice Activity Detection                                 |
+| `vadThreshold`     | `0.0`-`1.0`                 | VAD sensitivity (higher = stricter)                             |
+| `vadMinSpeechMs`   | Number                      | Minimum speech duration to keep (ms)                            |
+| `gpuMode`          | `"auto"`/`"cpu"`            | Use GPU acceleration when available or force CPU                |
+| `streamingEnabled` | `true`/`false`              | Enable live preview for compatible streaming models             |
 
 ## Models
 
@@ -107,15 +116,39 @@ dybur models list      # List available models
 dybur models switch    # Select a model interactively
 ```
 
-| Model | Size | Languages | Description |
-|-------|------|-----------|-------------|
-| `parakeet-tdt-v3-int8` | ~670 MB | 25 | **Default.** Multilingual transducer, balanced accuracy |
-| `parakeet-tdt-v2-int8` | ~660 MB | English | Fast English-only transducer |
-| `nemotron-streaming-int8` | ~660 MB | English | Low-latency streaming transducer |
-| `whisper-large-v3-turbo-int8` | ~1.1 GB | 99 | OpenAI Whisper, broad language support |
-| `whisper-large-v3-turbo-fp16` | ~1.6 GB | 99 | Whisper FP16, higher accuracy |
+| Model                         | Size    | Languages | Description                                             |
+| ----------------------------- | ------- | --------- | ------------------------------------------------------- |
+| `parakeet-tdt-v3-int8`        | ~670 MB | 25        | **Default.** Multilingual transducer, balanced accuracy |
+| `parakeet-tdt-v2-int8`        | ~660 MB | English   | Fast English-only transducer                            |
+| `nemotron-streaming-int8`     | ~660 MB | English   | Low-latency streaming transducer                        |
+| `whisper-large-v3-turbo-int8` | ~1.1 GB | 99        | OpenAI Whisper, broad language support                  |
+| `whisper-large-v3-turbo-fp16` | ~1.6 GB | 99        | Whisper FP16, higher accuracy                           |
 
 Models are downloaded automatically on first use.
+
+### Manual Model Provisioning
+
+For offline or locked-down machines, pre-provision models from a connected machine:
+
+1. On the connected machine, run `dybur models download <model-id>`.
+2. Copy the downloaded model directory into the target machine's models directory:
+   - macOS: `~/Library/Application Support/dybur/models/<model-id>`
+   - Windows: `%APPDATA%\dybur\models\<model-id>`
+3. If VAD is enabled, also copy `silero-vad` from the same `models` directory.
+4. On the target machine, run `dybur models set <model-id>` and `dybur doctor`.
+
+Keep the copied `metadata.json` file with each model directory; dybur uses it for status and cleanup.
+
+### ASR Evaluation
+
+Use the local scoring harness to compare saved model hypotheses across a repeatable sample set:
+
+```sh
+pnpm eval:asr benchmarks/asr/example.json
+pnpm eval:asr benchmarks/asr/example.json --format json
+```
+
+The harness reports WER, CER, median latency, and realtime factor. See `docs/asr-evaluation.md` for the manifest shape and recommended sample set.
 
 ## Requirements
 

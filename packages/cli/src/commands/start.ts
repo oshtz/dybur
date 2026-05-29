@@ -7,7 +7,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import {
-  isDefaultModelInstalled,
+  isModelInstalled,
   downloadModel,
   DEFAULT_MODEL,
   downloadTrayApp,
@@ -37,7 +37,10 @@ function isTrayAppRunning(): boolean {
   }
 
   try {
-    const result = execSync('pgrep -x dybur', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const result = execSync('pgrep -x dybur', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     return result.trim().length > 0;
   } catch {
     // pgrep returns non-zero exit code if no process found
@@ -96,8 +99,9 @@ export async function startCommand(_args: string[]): Promise<void> {
   console.log('');
 
   // Check if model is installed
-  if (!isDefaultModelInstalled()) {
-    warning('Default model not found');
+  const modelId = config.model ?? DEFAULT_MODEL;
+  if (!isModelInstalled(modelId)) {
+    warning(`Model not found: ${modelId}`);
     info('Downloading model from HuggingFace...');
     console.log(`  ${dim('This only needs to happen once')}`);
     console.log('');
@@ -105,7 +109,7 @@ export async function startCommand(_args: string[]): Promise<void> {
     let lastFile = '';
 
     try {
-      await downloadModel(DEFAULT_MODEL, (downloaded, total, file) => {
+      await downloadModel(modelId, (downloaded, total, file) => {
         if (file && file !== lastFile) {
           if (lastFile) {
             process.stdout.write('\n');
@@ -126,7 +130,7 @@ export async function startCommand(_args: string[]): Promise<void> {
     } catch (err) {
       console.log('\n');
       error(`Failed to download model: ${err}`);
-      info(`Run ${cyan('dybur models prefetch')} to try again`);
+      info(`Run ${cyan(`dybur models download ${modelId}`)} to try again`);
       process.exit(1);
     }
   }
@@ -168,7 +172,9 @@ export async function startCommand(_args: string[]): Promise<void> {
       console.log('');
       info('You can try:');
       console.log(`  ${dim('1.')} Check your internet connection`);
-      console.log(`  ${dim('2.')} Download manually from ${cyan('https://github.com/oshtz/dybur/releases')}`);
+      console.log(
+        `  ${dim('2.')} Download manually from ${cyan('https://github.com/oshtz/dybur/releases')}`
+      );
       console.log(`  ${dim('3.')} Build from source: ${cyan('cd apps/tray && pnpm tauri build')}`);
       process.exit(1);
     }

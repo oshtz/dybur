@@ -93,14 +93,16 @@ impl BpeTokenizer {
         );
 
         // Detect EOT and SOT tokens (support Whisper, Qwen, and other model formats)
-        let eot_token_id = vocab_reverse.get("<|endoftext|>")
-            .or_else(|| vocab_reverse.get("<|im_end|>"))  // Qwen-style
+        let eot_token_id = vocab_reverse
+            .get("<|endoftext|>")
+            .or_else(|| vocab_reverse.get("<|im_end|>")) // Qwen-style
             .or_else(|| vocab_reverse.get("</s>"))
             .copied()
             .unwrap_or(whisper_tokens::EOT);
 
-        let sot_token_id = vocab_reverse.get("<|startoftranscript|>")
-            .or_else(|| vocab_reverse.get("<|im_start|>"))  // Qwen-style
+        let sot_token_id = vocab_reverse
+            .get("<|startoftranscript|>")
+            .or_else(|| vocab_reverse.get("<|im_start|>")) // Qwen-style
             .or_else(|| vocab_reverse.get("<s>"))
             .copied()
             .unwrap_or(whisper_tokens::SOT);
@@ -156,7 +158,7 @@ impl BpeTokenizer {
 
         for ch in chars {
             match ch {
-                '\u{0120}' => result.push(' '), // Ġ -> space
+                '\u{0120}' => result.push(' '),  // Ġ -> space
                 '\u{010A}' => result.push('\n'), // Ċ -> newline
                 '\u{010D}' => result.push('\r'), // Special carriage return
                 // Handle other byte encodings (characters in range U+0100 to U+0200)
@@ -229,13 +231,14 @@ pub fn filter_whisper_special_tokens(token_ids: &[i64]) -> Vec<i64> {
                 return false;
             }
             // Filter known special tokens
-            !matches!(id,
-                whisper_tokens::SOT |
-                whisper_tokens::EOT |
-                whisper_tokens::TRANSCRIBE |
-                whisper_tokens::TRANSLATE |
-                whisper_tokens::NO_TIMESTAMPS |
-                whisper_tokens::BLANK
+            !matches!(
+                id,
+                whisper_tokens::SOT
+                    | whisper_tokens::EOT
+                    | whisper_tokens::TRANSCRIBE
+                    | whisper_tokens::TRANSLATE
+                    | whisper_tokens::NO_TIMESTAMPS
+                    | whisper_tokens::BLANK
             )
         })
         .copied()

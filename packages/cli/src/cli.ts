@@ -14,7 +14,7 @@ import { vadCommand } from './commands/vad.js';
 import { gpuCommand } from './commands/gpu.js';
 import { banner, brand, header, command, info, error, dim, cyan, boxMessage } from './ui.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.2.1';
 
 function showHelp(): void {
   banner();
@@ -31,13 +31,13 @@ function showHelp(): void {
   command('doctor, diag', 'Run diagnostics');
   command('models, m', 'Manage speech models');
   command('devices, d', 'Manage input devices');
-  command('vad', 'Toggle Voice Activity Detection');
+  command('vad', 'Tune Voice Activity Detection');
   command('gpu', 'Toggle GPU acceleration');
   console.log('');
 
   header('Model Commands');
   command('models list', 'List installed models');
-  command('models prefetch', 'Download default model');
+  command('models download <model-id>', 'Download a speech model');
   command('models clean', 'Remove unused models');
   console.log('');
 
@@ -45,6 +45,12 @@ function showHelp(): void {
   command('d, d l', 'List & select microphone interactively');
   command('d set <name>', 'Select a specific microphone');
   command('d reset', 'Reset to system default');
+  console.log('');
+
+  header('VAD Commands');
+  command('vad status', 'Show VAD settings');
+  command('vad threshold 0.6', 'Set speech sensitivity');
+  command('vad silence 1000', 'Set silence split timeout');
   console.log('');
 
   header('Options');

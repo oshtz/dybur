@@ -4,9 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Welcome to dybur</title>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script type="module" src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.esm.js"></script>
-    <script nomodule src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.js"></script>
     <style>
       :root {
         --bg-primary: #0a0f0d;
@@ -31,7 +28,7 @@
       }
 
       body {
-        font-family: 'JetBrains Mono', monospace;
+        font-family: Consolas, 'SFMono-Regular', 'Liberation Mono', Menlo, monospace;
         background: var(--bg-primary);
         color: var(--text-primary);
         min-height: 100vh;
@@ -106,6 +103,8 @@
         flex: 1;
         display: flex;
         flex-direction: column;
+        min-height: 0;
+        overflow-y: auto;
       }
 
       .step {
@@ -119,8 +118,14 @@
       }
 
       @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
 
       .step-title {
@@ -165,8 +170,13 @@
         flex-shrink: 0;
       }
 
-      .check-icon ion-icon {
-        font-size: 14px;
+      .glyph {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 1em;
+        font-weight: 700;
+        line-height: 1;
       }
 
       .check-icon.pending {
@@ -191,8 +201,13 @@
       }
 
       @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
       }
 
       .check-text {
@@ -255,6 +270,82 @@
         color: var(--text-secondary);
       }
 
+      .model-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 218px;
+        margin-bottom: 14px;
+        padding-right: 4px;
+        overflow-y: auto;
+      }
+
+      .model-option {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-secondary);
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+        transition:
+          border-color 0.2s,
+          background 0.2s;
+      }
+
+      .model-option:hover,
+      .model-option.selected {
+        border-color: var(--accent);
+        background: rgba(94, 255, 192, 0.08);
+      }
+
+      .model-option-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+
+      .model-option-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .model-option-size {
+        font-size: 12px;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+
+      .model-option-description {
+        margin-bottom: 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--text-secondary);
+      }
+
+      .model-option-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .model-tag {
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: var(--bg-tertiary);
+        color: var(--text-secondary);
+        font-size: 11px;
+      }
+
+      .model-tag.ready {
+        color: var(--success);
+        background: rgba(94, 255, 192, 0.12);
+      }
+
       /* Tutorial Section */
       .tutorial-box {
         background: var(--bg-secondary);
@@ -278,7 +369,7 @@
         padding: 8px 12px;
         background: var(--bg-primary);
         border-radius: 6px;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: Consolas, 'SFMono-Regular', 'Liberation Mono', Menlo, monospace;
         font-size: 14px;
         font-weight: 600;
         color: var(--accent);
@@ -386,7 +477,7 @@
         border-radius: 8px;
         font-size: 14px;
         font-weight: 500;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: Consolas, 'SFMono-Regular', 'Liberation Mono', Menlo, monospace;
         cursor: pointer;
         transition: all 0.2s;
         border: none;
@@ -493,7 +584,9 @@
       }
 
       @keyframes spin {
-        to { transform: rotate(360deg); }
+        to {
+          transform: rotate(360deg);
+        }
       }
     </style>
   </head>
@@ -519,24 +612,26 @@
         <!-- Step 1: Welcome -->
         <div class="step active" data-step="1">
           <h2 class="step-title">Welcome to dybur</h2>
-          <p class="step-description">Your voice, your words, instantly typed anywhere on your computer.</p>
+          <p class="step-description">
+            Your voice, your words, instantly typed anywhere on your computer.
+          </p>
 
           <div class="privacy-banner">
-            <span class="icon"><ion-icon name="lock-closed"></ion-icon></span>
+            <span class="icon"><span class="glyph" aria-hidden="true">#</span></span>
             <span class="text">100% offline - your voice never leaves your computer</span>
           </div>
 
           <div class="feature-list">
             <div class="feature-item">
-              <span class="feature-icon"><ion-icon name="flash"></ion-icon></span>
+              <span class="feature-icon"><span class="glyph" aria-hidden="true">&gt;</span></span>
               <span class="feature-text">Press a hotkey and speak - text appears instantly</span>
             </div>
             <div class="feature-item">
-              <span class="feature-icon"><ion-icon name="globe"></ion-icon></span>
+              <span class="feature-icon"><span class="glyph" aria-hidden="true">@</span></span>
               <span class="feature-text">Works with any application - emails, documents, code</span>
             </div>
             <div class="feature-item">
-              <span class="feature-icon"><ion-icon name="sparkles"></ion-icon></span>
+              <span class="feature-icon"><span class="glyph" aria-hidden="true">*</span></span>
               <span class="feature-text">Smart punctuation and capitalization</span>
             </div>
           </div>
@@ -554,28 +649,28 @@
 
           <div class="check-list">
             <div class="check-item" data-check="os">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Operating System</div>
                 <div class="detail" id="os-detail">Checking...</div>
               </div>
             </div>
             <div class="check-item" data-check="disk">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Disk Space</div>
                 <div class="detail" id="disk-detail">Checking available space...</div>
               </div>
             </div>
             <div class="check-item" data-check="microphone">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Microphone</div>
                 <div class="detail" id="mic-detail">Checking for audio input...</div>
               </div>
             </div>
             <div class="check-item" data-check="internet" id="internet-check-item">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Internet Connection</div>
                 <div class="detail" id="internet-detail">Required for model download...</div>
@@ -585,7 +680,9 @@
 
           <div class="buttons">
             <button class="btn btn-secondary" onclick="prevStep()">Back</button>
-            <button class="btn btn-primary" id="step2-next" onclick="nextStep()" disabled>Continue</button>
+            <button class="btn btn-primary" id="step2-next" onclick="nextStep()" disabled>
+              Continue
+            </button>
           </div>
         </div>
 
@@ -596,17 +693,24 @@
 
           <div class="check-list">
             <div class="check-item" data-check="mic-permission">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Microphone Access</div>
                 <div class="detail" id="mic-perm-detail">Required to hear your voice</div>
               </div>
             </div>
-            <div class="check-item" data-check="accessibility" id="accessibility-item" style="display: none;">
-              <div class="check-icon pending"><ion-icon name="ellipse"></ion-icon></div>
+            <div
+              class="check-item"
+              data-check="accessibility"
+              id="accessibility-item"
+              style="display: none"
+            >
+              <div class="check-icon pending"><span class="glyph" aria-hidden="true">.</span></div>
               <div class="check-text">
                 <div class="label">Accessibility Permission</div>
-                <div class="detail" id="acc-perm-detail">Required to type text into applications (macOS)</div>
+                <div class="detail" id="acc-perm-detail">
+                  Required to type text into applications (macOS)
+                </div>
               </div>
             </div>
           </div>
@@ -619,28 +723,34 @@
 
         <!-- Step 4: Model Download -->
         <div class="step" data-step="4">
-          <h2 class="step-title">Download Speech Model</h2>
-          <p class="step-description">The AI model is required for speech recognition. This is a one-time download.</p>
+          <h2 class="step-title">Choose Speech Model</h2>
+          <p class="step-description">
+            Pick the local model dybur should use. You can change this later from the tray menu.
+          </p>
+
+          <div class="model-grid" id="model-grid"></div>
 
           <div class="download-section">
             <div class="download-info">
-              <span class="file-name" id="download-filename">Parakeet TDT 0.6B</span>
-              <span class="file-size" id="download-size">~670 MB</span>
+              <span class="file-name" id="download-filename">Select a model</span>
+              <span class="file-size" id="download-size">-</span>
             </div>
             <div class="progress-bar">
               <div class="progress-bar-fill" id="download-progress"></div>
             </div>
-            <div class="download-status" id="download-status">Ready to download</div>
+            <div class="download-status" id="download-status">Choose a model to continue</div>
           </div>
 
-          <div class="privacy-banner" style="margin-top: 16px;">
-            <span class="icon"><ion-icon name="desktop"></ion-icon></span>
+          <div class="privacy-banner" style="margin-top: 16px">
+            <span class="icon"><span class="glyph" aria-hidden="true">[]</span></span>
             <span class="text">The model runs entirely on your computer - no cloud processing</span>
           </div>
 
           <div class="buttons">
             <button class="btn btn-secondary" onclick="prevStep()" id="step4-back">Back</button>
-            <button class="btn btn-primary" id="step4-download" onclick="startDownload()">Download Model</button>
+            <button class="btn btn-primary" id="step4-download" onclick="startDownload()">
+              Download Model
+            </button>
           </div>
         </div>
 
@@ -680,18 +790,25 @@
 
         <!-- Completion -->
         <div class="step" data-step="complete">
-          <div class="completion-icon"><ion-icon name="checkmark"></ion-icon></div>
+          <div class="completion-icon"><span class="glyph" aria-hidden="true">OK</span></div>
           <h2 class="completion-title">You're All Set!</h2>
-          <p class="completion-text">dybur is ready to use. Press your hotkey anytime to start dictating.</p>
+          <p class="completion-text">
+            dybur is ready to use. Press your hotkey anytime to start dictating.
+          </p>
 
-          <div class="feature-list" style="background: var(--bg-secondary); padding: 16px; border-radius: 8px;">
+          <div
+            class="feature-list"
+            style="background: var(--bg-secondary); padding: 16px; border-radius: 8px"
+          >
             <div class="feature-item">
-              <span class="feature-icon"><ion-icon name="bulb"></ion-icon></span>
+              <span class="feature-icon"><span class="glyph" aria-hidden="true">i</span></span>
               <span class="feature-text">Tip: Right-click the tray icon to access settings</span>
             </div>
             <div class="feature-item">
-              <span class="feature-icon"><ion-icon name="bulb"></ion-icon></span>
-              <span class="feature-text">Tip: dybur runs in the background - look for the tray icon</span>
+              <span class="feature-icon"><span class="glyph" aria-hidden="true">i</span></span>
+              <span class="feature-text"
+                >Tip: dybur runs in the background - look for the tray icon</span
+              >
             </div>
           </div>
 
@@ -708,7 +825,10 @@
       let totalSteps = 5;
       let systemCheckPassed = false;
       let downloadComplete = false;
+      let downloadInProgress = false;
       let modelAlreadyInstalled = false;
+      let models = [];
+      let selectedModelId = null;
       let hotkey = 'Ctrl+Shift+Space';
 
       // Tauri API (Tauri 2.x structure)
@@ -717,29 +837,53 @@
 
       // Initialize
       document.addEventListener('DOMContentLoaded', async () => {
-
-        // Check if model is already installed
+        // Load model options before system checks so internet can be optional for installed models.
         if (invoke) {
           try {
-            modelAlreadyInstalled = await invoke('ftue_check_model_installed');
-            console.log('FTUE: Model already installed:', modelAlreadyInstalled);
-            if (modelAlreadyInstalled) {
-              // Hide step 4 (download) progress indicator and adjust total steps
-              const step4Progress = document.querySelector('.progress-step[data-step="4"]');
-              if (step4Progress) {
-                step4Progress.classList.add('hidden');
-              }
-              // Also hide internet check since not needed
-              const internetCheckItem = document.getElementById('internet-check-item');
-              if (internetCheckItem) {
-                internetCheckItem.style.display = 'none';
-              }
-            }
+            models = await invoke('ftue_get_models');
+            selectedModelId =
+              models.find((model) => model.current)?.id ||
+              models.find((model) => model.isDefault)?.id ||
+              models[0]?.id ||
+              null;
+            modelAlreadyInstalled = currentModel()?.installed || false;
+            renderModelOptions();
+            updateSelectedModelState();
           } catch (e) {
-            console.error('FTUE: Failed to check model status:', e);
+            console.error('FTUE: Failed to load model options:', e);
           }
         } else {
           console.warn('FTUE: Tauri invoke API not available, using fallback behavior');
+          models = [
+            {
+              id: 'parakeet-tdt-v3-int8',
+              displayName: 'Parakeet TDT v3 (Multilingual)',
+              description: 'Balanced accuracy, 25 languages',
+              size: '670 MB',
+              languages: [
+                'en',
+                'de',
+                'es',
+                'fr',
+                'it',
+                'pt',
+                'nl',
+                'pl',
+                'ru',
+                'uk',
+                'ja',
+                'ko',
+                'zh',
+              ],
+              supportsStreaming: false,
+              installed: false,
+              isDefault: true,
+              current: true,
+            },
+          ];
+          selectedModelId = models[0].id;
+          renderModelOptions();
+          updateSelectedModelState();
         }
 
         // Load config to get hotkey
@@ -769,57 +913,164 @@
 
           await tauriEvent.listen('ftue:download-complete', () => {
             downloadComplete = true;
+            downloadInProgress = false;
+            markSelectedModelInstalled();
+            renderModelOptions();
             document.getElementById('download-status').textContent = 'Download complete!';
             document.getElementById('download-progress').style.width = '100%';
             document.getElementById('step4-download').textContent = 'Continue';
             document.getElementById('step4-download').disabled = false;
+            document.getElementById('step4-back').disabled = false;
             document.getElementById('step4-download').onclick = nextStep;
           });
 
           await tauriEvent.listen('ftue:download-error', (e) => {
+            downloadInProgress = false;
             document.getElementById('download-status').textContent = 'Error: ' + e.payload.error;
             document.getElementById('step4-download').disabled = false;
             document.getElementById('step4-download').textContent = 'Retry Download';
+            document.getElementById('step4-back').disabled = false;
           });
-        }
 
-        // Listen for transcription results from dictation test
-        await tauriEvent.listen('ftue:transcription', (e) => {
-          const testInput = document.getElementById('test-dictation-input');
-          if (testInput) {
-            testInput.value = e.payload;
-            testInput.focus();
-          }
-        });
+          // Listen for transcription results from dictation test
+          await tauriEvent.listen('ftue:transcription', (e) => {
+            const testInput = document.getElementById('test-dictation-input');
+            if (testInput) {
+              testInput.value = e.payload;
+              testInput.focus();
+            }
+          });
+        } else {
+          console.warn('FTUE: Tauri event API not available, skipping event listeners');
+        }
       });
 
       function updateHotkeyDisplay(hotkey) {
         const keys = hotkey.split('+');
         const display = document.getElementById('hotkey-display');
-        display.innerHTML = keys.map(k => `<span class="key">${k.trim()}</span>`).join('');
+        display.innerHTML = keys.map((k) => `<span class="key">${k.trim()}</span>`).join('');
+      }
+
+      function currentModel() {
+        return models.find((model) => model.id === selectedModelId);
+      }
+
+      function renderModelOptions() {
+        const grid = document.getElementById('model-grid');
+        if (!grid) return;
+
+        if (!models.length) {
+          grid.innerHTML = '<div class="download-status">No model options available.</div>';
+          return;
+        }
+
+        grid.innerHTML = models
+          .map((model) => {
+            const languageLabel = model.languages.length
+              ? `${model.languages.length} language${model.languages.length === 1 ? '' : 's'}`
+              : '99 languages';
+            const selectedClass = model.id === selectedModelId ? ' selected' : '';
+            const tags = [
+              model.installed
+                ? '<span class="model-tag ready">Installed</span>'
+                : '<span class="model-tag">Download</span>',
+              model.isDefault ? '<span class="model-tag">Default</span>' : '',
+              model.supportsStreaming ? '<span class="model-tag">Streaming</span>' : '',
+              `<span class="model-tag">${escapeHtml(languageLabel)}</span>`,
+            ].join('');
+
+            return `
+              <button type="button" class="model-option${selectedClass}" data-model-id="${escapeHtml(model.id)}">
+                <div class="model-option-header">
+                  <span class="model-option-title">${escapeHtml(model.displayName)}</span>
+                  <span class="model-option-size">${escapeHtml(model.size)}</span>
+                </div>
+                <div class="model-option-description">${escapeHtml(model.description)}</div>
+                <div class="model-option-tags">${tags}</div>
+              </button>
+            `;
+          })
+          .join('');
+
+        grid.querySelectorAll('.model-option').forEach((button) => {
+          button.addEventListener('click', () => selectModel(button.dataset.modelId));
+        });
+      }
+
+      function selectModel(modelId) {
+        if (downloadInProgress) return;
+
+        selectedModelId = modelId;
+        downloadComplete = false;
+        modelAlreadyInstalled = currentModel()?.installed || false;
+        renderModelOptions();
+        updateSelectedModelState();
+      }
+
+      function updateSelectedModelState() {
+        const model = currentModel();
+        const filename = document.getElementById('download-filename');
+        const size = document.getElementById('download-size');
+        const status = document.getElementById('download-status');
+        const progress = document.getElementById('download-progress');
+        const button = document.getElementById('step4-download');
+        const back = document.getElementById('step4-back');
+
+        if (!model) {
+          filename.textContent = 'Select a model';
+          size.textContent = '-';
+          status.textContent = 'Choose a model to continue';
+          progress.style.width = '0%';
+          button.textContent = 'Download Model';
+          button.disabled = true;
+          return;
+        }
+
+        filename.textContent = model.displayName;
+        size.textContent = model.size;
+        button.disabled = false;
+        button.onclick = startDownload;
+        back.disabled = false;
+
+        if (model.installed) {
+          status.textContent = 'Already installed';
+          progress.style.width = '100%';
+          button.textContent = 'Use Selected Model';
+        } else {
+          status.textContent = 'Ready to download';
+          progress.style.width = '0%';
+          button.textContent = 'Download Model';
+        }
+      }
+
+      function markSelectedModelInstalled() {
+        const model = currentModel();
+        if (model) {
+          model.installed = true;
+          model.current = true;
+          models.forEach((item) => {
+            if (item.id !== model.id) item.current = false;
+          });
+        }
+        modelAlreadyInstalled = true;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       }
 
       function updateProgress() {
-        const steps = document.querySelectorAll('.progress-step:not(.hidden)');
-        let visibleStepIndex = 0;
-
         document.querySelectorAll('.progress-step').forEach((step) => {
           const stepNum = parseInt(step.dataset.step);
           step.classList.remove('active', 'completed');
 
-          // Skip hidden steps
-          if (step.classList.contains('hidden')) return;
-
-          // Determine actual position in visible steps
-          let actualStep = stepNum;
-          if (modelAlreadyInstalled && stepNum === 5) {
-            actualStep = 4; // Step 5 becomes step 4 when download is skipped
-          }
-
-          if (stepNum < currentStep || (modelAlreadyInstalled && stepNum === 4)) {
-            if (stepNum < currentStep) {
-              step.classList.add('completed');
-            }
+          if (stepNum < currentStep) {
+            step.classList.add('completed');
           } else if (stepNum === currentStep) {
             step.classList.add('active');
           }
@@ -827,7 +1078,7 @@
       }
 
       function showStep(step) {
-        document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.step').forEach((s) => s.classList.remove('active'));
         const stepEl = document.querySelector(`.step[data-step="${step}"]`);
         if (stepEl) {
           stepEl.classList.add('active');
@@ -853,11 +1104,6 @@
       async function nextStep() {
         let nextStepNum = currentStep + 1;
 
-        // Skip step 4 (download) if model is already installed
-        if (modelAlreadyInstalled && nextStepNum === 4) {
-          nextStepNum = 5;
-        }
-
         if (nextStepNum <= totalSteps) {
           currentStep = nextStepNum;
           showStep(currentStep);
@@ -868,11 +1114,6 @@
 
       function prevStep() {
         let prevStepNum = currentStep - 1;
-
-        // Skip step 4 (download) if model is already installed
-        if (modelAlreadyInstalled && prevStepNum === 4) {
-          prevStepNum = 3;
-        }
 
         if (prevStepNum >= 1) {
           currentStep = prevStepNum;
@@ -919,10 +1160,18 @@
           updateCheckStatus('disk', results.disk.ok ? 'success' : 'error', results.disk.detail);
         }
         if (results.microphone) {
-          updateCheckStatus('microphone', results.microphone.ok ? 'success' : 'error', results.microphone.detail);
+          updateCheckStatus(
+            'microphone',
+            results.microphone.ok ? 'success' : 'error',
+            results.microphone.detail
+          );
         }
         if (results.internet && !modelAlreadyInstalled) {
-          updateCheckStatus('internet', results.internet.ok ? 'success' : 'error', results.internet.detail);
+          updateCheckStatus(
+            'internet',
+            results.internet.ok ? 'success' : 'error',
+            results.internet.detail
+          );
         }
 
         const requiredChecks = modelAlreadyInstalled
@@ -943,9 +1192,9 @@
         icon.className = 'check-icon ' + status;
 
         if (status === 'success') {
-          icon.innerHTML = '<ion-icon name="checkmark"></ion-icon>';
+          icon.innerHTML = '<span class="glyph" aria-hidden="true">OK</span>';
         } else if (status === 'error') {
-          icon.innerHTML = '<ion-icon name="close"></ion-icon>';
+          icon.innerHTML = '<span class="glyph" aria-hidden="true">!</span>';
         } else if (status === 'checking') {
           icon.innerHTML = '<div class="spinner"></div>';
         }
@@ -956,19 +1205,29 @@
       }
 
       async function startDownload() {
+        const model = currentModel();
+        if (!model) {
+          document.getElementById('download-status').textContent = 'Choose a model first';
+          return;
+        }
+
         const btn = document.getElementById('step4-download');
         btn.disabled = true;
-        btn.textContent = 'Downloading...';
+        btn.textContent = model.installed ? 'Applying...' : 'Downloading...';
+        downloadInProgress = true;
         document.getElementById('step4-back').disabled = true;
-        document.getElementById('download-status').textContent = 'Starting download...';
+        document.getElementById('download-status').textContent = model.installed
+          ? 'Selecting model...'
+          : 'Starting download...';
 
         if (invoke) {
           try {
-            await invoke('ftue_start_download');
+            await invoke('ftue_start_download', { modelId: selectedModelId });
           } catch (e) {
             console.error('Download failed:', e);
+            downloadInProgress = false;
             btn.disabled = false;
-            btn.textContent = 'Retry Download';
+            btn.textContent = model.installed ? 'Use Selected Model' : 'Retry Download';
             document.getElementById('step4-back').disabled = false;
             document.getElementById('download-status').textContent = 'Error: ' + e;
           }
@@ -986,13 +1245,19 @@
             progress = 100;
             clearInterval(interval);
             downloadComplete = true;
+            downloadInProgress = false;
+            markSelectedModelInstalled();
+            renderModelOptions();
             document.getElementById('download-status').textContent = 'Download complete!';
             document.getElementById('step4-download').textContent = 'Continue';
             document.getElementById('step4-download').disabled = false;
             document.getElementById('step4-download').onclick = nextStep;
             document.getElementById('step4-back').disabled = false;
           }
-          updateDownloadProgress({ progress: Math.min(progress, 100), status: `Downloading... ${Math.round(progress)}%` });
+          updateDownloadProgress({
+            progress: Math.min(progress, 100),
+            status: `Downloading... ${Math.round(progress)}%`,
+          });
         }, 200);
       }
 
@@ -1008,9 +1273,10 @@
 
         // Update file name with file count
         if (data.currentFile) {
-          const fileInfo = data.totalFiles > 1
-            ? `${data.currentFile} (${data.fileIndex + 1}/${data.totalFiles})`
-            : data.currentFile;
+          const fileInfo =
+            data.totalFiles > 1
+              ? `${data.currentFile} (${data.fileIndex + 1}/${data.totalFiles})`
+              : data.currentFile;
           document.getElementById('download-filename').textContent = fileInfo;
         }
 
@@ -1037,7 +1303,11 @@
       }
 
       async function skipSetup() {
-        if (confirm('Are you sure you want to skip setup? You can always run it later from the tray menu.')) {
+        if (
+          confirm(
+            'Are you sure you want to skip setup? You can always run it later from the tray menu.'
+          )
+        ) {
           if (invoke) {
             try {
               await invoke('ftue_skip');

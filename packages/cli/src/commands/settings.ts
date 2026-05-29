@@ -41,6 +41,7 @@ export async function settingsCommand(args: string[]): Promise<void> {
     keyValue('Clipboard cleanup', config.clipboardCleanup ? 'enabled' : 'disabled');
     keyValue('Recording mode', config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle');
     keyValue('VAD (silence filter)', config.vadEnabled ? 'enabled' : 'disabled');
+    keyValue('Streaming preview', config.streamingEnabled ? 'enabled' : 'disabled');
     if (config.vadEnabled) {
       keyValue('  VAD threshold', `${config.vadThreshold}`);
       keyValue('  VAD min speech', `${config.vadMinSpeechMs}ms`);

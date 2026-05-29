@@ -27,8 +27,7 @@ export interface DyburConfig {
   sentenceCase: boolean;
 
   /**
-   * Silence duration in milliseconds before auto-stopping recording
-   * Set to 0 to disable auto-stop
+   * Minimum silence duration in milliseconds used to split VAD speech segments
    * @default 1000
    */
   silenceTimeoutMs: number;
@@ -84,6 +83,12 @@ export interface DyburConfig {
    * @default "auto"
    */
   gpuMode: 'auto' | 'cpu';
+
+  /**
+   * Enable real-time streaming transcription preview for models that support it
+   * @default true
+   */
+  streamingEnabled: boolean;
 }
 
 /**
@@ -102,6 +107,7 @@ export const DEFAULT_CONFIG: DyburConfig = {
   vadThreshold: 0.5,
   vadMinSpeechMs: 250,
   gpuMode: 'auto',
+  streamingEnabled: true,
 };
 
 /**
@@ -326,6 +332,15 @@ export function validateConfig(config: Partial<DyburConfig>): ValidationResult {
         value: config.gpuMode,
       });
     }
+  }
+
+  // Validate streamingEnabled
+  if (config.streamingEnabled !== undefined && typeof config.streamingEnabled !== 'boolean') {
+    errors.push({
+      field: 'streamingEnabled',
+      message: 'streamingEnabled must be a boolean',
+      value: config.streamingEnabled,
+    });
   }
 
   return {

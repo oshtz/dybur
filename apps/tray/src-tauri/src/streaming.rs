@@ -8,16 +8,12 @@ use ort::value::TensorRef;
 use std::sync::{Arc, Mutex};
 
 use crate::audio::resample_linear;
-use crate::stt::{SttEngine, SttError, StreamingMetadata};
+use crate::stt::{StreamingMetadata, SttEngine, SttError};
 
 /// Audio processing constants (must match stt.rs)
 const SAMPLE_RATE: u32 = 16000;
 const HOP_LENGTH: usize = 160;
 const N_MELS: usize = 128;
-
-/// Minimum samples needed for one chunk (window_size * HOP_LENGTH)
-/// Default window_size is 112, so 112 * 160 = 17920 samples (~1.12s)
-const MIN_CHUNK_SAMPLES: usize = 112 * HOP_LENGTH;
 
 /// Streaming transcription state
 /// Holds all LSTM cache state needed between inference calls
@@ -105,25 +101,23 @@ impl StreamingState {
 
         // Initialize decoder output with BOS token
         match initialize_decoder_output(engine) {
-            Ok((dim, output, h, c)) => {
-                Some(Self {
-                    cache_channel,
-                    cache_time,
-                    cache_len: 0,
-                    decoder_h_state: h,
-                    decoder_c_state: c,
-                    decoder_output: output,
-                    tokens: Vec::new(),
-                    chunk_count: 0,
-                    processed_samples: 0,
-                    source_sample_rate,
-                    metadata,
-                    vocab,
-                    mel_filterbank,
-                    blank_id,
-                    decoder_dim: dim,
-                })
-            }
+            Ok((dim, output, h, c)) => Some(Self {
+                cache_channel,
+                cache_time,
+                cache_len: 0,
+                decoder_h_state: h,
+                decoder_c_state: c,
+                decoder_output: output,
+                tokens: Vec::new(),
+                chunk_count: 0,
+                processed_samples: 0,
+                source_sample_rate,
+                metadata,
+                vocab,
+                mel_filterbank,
+                blank_id,
+                decoder_dim: dim,
+            }),
             Err(e) => {
                 crate::log_error!("streaming", "Failed to initialize decoder: {}", e);
                 None
@@ -173,8 +167,11 @@ impl StreamingState {
 }
 
 /// Initialize decoder with BOS token and return initial state
-fn initialize_decoder_output(engine: &mut SttEngine) -> Result<(usize, Vec<f32>, ArrayD<f32>, ArrayD<f32>), SttError> {
-    let decoder = engine.get_decoder_session_mut()
+fn initialize_decoder_output(
+    engine: &mut SttEngine,
+) -> Result<(usize, Vec<f32>, ArrayD<f32>, ArrayD<f32>), SttError> {
+    let decoder = engine
+        .get_decoder_session_mut()
         .ok_or(SttError::NotLoaded)?;
 
     let decoder_hidden_dim = 640;
@@ -203,10 +200,13 @@ fn initialize_decoder_output(engine: &mut SttEngine) -> Result<(usize, Vec<f32>,
         ])
         .map_err(|e| SttError::InferenceFailed(format!("Initial decoder failed: {}", e)))?;
 
-    let init_dec_out = init_dec_outputs.get("outputs")
+    let init_dec_out = init_dec_outputs
+        .get("outputs")
         .ok_or_else(|| SttError::InferenceFailed("No initial decoder outputs".to_string()))?;
-    let (init_dec_shape, init_dec_data) = init_dec_out.try_extract_tensor::<f32>()
-        .map_err(|e| SttError::InferenceFailed(format!("Failed to extract initial decoder output: {}", e)))?;
+    let (init_dec_shape, init_dec_data) =
+        init_dec_out.try_extract_tensor::<f32>().map_err(|e| {
+            SttError::InferenceFailed(format!("Failed to extract initial decoder output: {}", e))
+        })?;
 
     let dim = init_dec_shape[1] as usize;
     let output: Vec<f32> = init_dec_data.to_vec();
@@ -253,13 +253,8 @@ pub fn process_incremental(
 
     // Calculate chunk size accounting for sample rate difference
     // chunk_samples is in target 16kHz rate, we need to calculate equivalent in source rate
-    let chunk_samples_16k = state.metadata.window_size * HOP_LENGTH;
-    let chunk_samples_source = if state.source_sample_rate != SAMPLE_RATE {
-        // Scale chunk size to source sample rate
-        (chunk_samples_16k as f64 * state.source_sample_rate as f64 / SAMPLE_RATE as f64).ceil() as usize
-    } else {
-        chunk_samples_16k
-    };
+    let chunk_samples_source =
+        chunk_samples_for_source_rate(state.metadata.window_size, state.source_sample_rate);
 
     // Check if we have enough new samples for a chunk (in source sample rate)
     if new_samples < chunk_samples_source {
@@ -271,7 +266,11 @@ pub fn process_incremental(
 
     // Resample to 16kHz if needed
     let audio_slice: std::borrow::Cow<[f32]> = if state.source_sample_rate != SAMPLE_RATE {
-        std::borrow::Cow::Owned(resample_linear(audio_slice_source, state.source_sample_rate, SAMPLE_RATE))
+        std::borrow::Cow::Owned(resample_linear(
+            audio_slice_source,
+            state.source_sample_rate,
+            SAMPLE_RATE,
+        ))
     } else {
         std::borrow::Cow::Borrowed(audio_slice_source)
     };
@@ -297,8 +296,17 @@ pub fn process_incremental(
 
     // Run encoder and extract all outputs to owned values
     // This allows us to release the encoder borrow before getting decoder/joiner
-    let (enc_data_owned, encoder_dim, time_frames, new_cache_channel, new_cache_time, new_cache_len) = {
-        let encoder = engine.get_encoder_session_mut().ok_or(SttError::NotLoaded)?;
+    let (
+        enc_data_owned,
+        encoder_dim,
+        time_frames,
+        new_cache_channel,
+        new_cache_time,
+        new_cache_len,
+    ) = {
+        let encoder = engine
+            .get_encoder_session_mut()
+            .ok_or(SttError::NotLoaded)?;
 
         let mel_tensor = TensorRef::from_array_view(chunk_input.view())
             .map_err(|e| SttError::InferenceFailed(format!("mel tensor: {}", e)))?;
@@ -324,37 +332,54 @@ pub fn process_incremental(
             .map_err(|e| SttError::InferenceFailed(format!("Encoder chunk failed: {}", e)))?;
 
         // Extract encoder output to owned
-        let enc_out = encoder_outputs.get("outputs")
+        let enc_out = encoder_outputs
+            .get("outputs")
             .ok_or_else(|| SttError::InferenceFailed("No encoder outputs".to_string()))?;
-        let (enc_shape, enc_data) = enc_out.try_extract_tensor::<f32>()
-            .map_err(|e| SttError::InferenceFailed(format!("Failed to extract encoder output: {}", e)))?;
+        let (enc_shape, enc_data) = enc_out.try_extract_tensor::<f32>().map_err(|e| {
+            SttError::InferenceFailed(format!("Failed to extract encoder output: {}", e))
+        })?;
 
         let encoder_dim = enc_shape[1] as usize;
         let time_frames = enc_shape[2] as usize;
         let enc_data_owned: Vec<f32> = enc_data.to_vec();
 
         // Extract cache updates to owned
-        let cache_channel_next = encoder_outputs.get("cache_last_channel_next")
+        let cache_channel_next = encoder_outputs
+            .get("cache_last_channel_next")
             .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next".to_string()))?;
-        let (shape, data) = cache_channel_next.try_extract_tensor::<f32>()
+        let (shape, data) = cache_channel_next
+            .try_extract_tensor::<f32>()
             .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
         let new_cache_channel = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
             .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
 
-        let cache_time_next = encoder_outputs.get("cache_last_time_next")
+        let cache_time_next = encoder_outputs
+            .get("cache_last_time_next")
             .ok_or_else(|| SttError::InferenceFailed("No cache_last_time_next".to_string()))?;
-        let (shape, data) = cache_time_next.try_extract_tensor::<f32>()
+        let (shape, data) = cache_time_next
+            .try_extract_tensor::<f32>()
             .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache: {}", e)))?;
         let new_cache_time = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
             .map_err(|e| SttError::InferenceFailed(format!("Failed to reshape cache: {}", e)))?;
 
-        let cache_len_next = encoder_outputs.get("cache_last_channel_next_len")
-            .ok_or_else(|| SttError::InferenceFailed("No cache_last_channel_next_len".to_string()))?;
-        let (_, len_data) = cache_len_next.try_extract_tensor::<i64>()
-            .map_err(|e| SttError::InferenceFailed(format!("Failed to extract cache_len: {}", e)))?;
+        let cache_len_next = encoder_outputs
+            .get("cache_last_channel_next_len")
+            .ok_or_else(|| {
+                SttError::InferenceFailed("No cache_last_channel_next_len".to_string())
+            })?;
+        let (_, len_data) = cache_len_next.try_extract_tensor::<i64>().map_err(|e| {
+            SttError::InferenceFailed(format!("Failed to extract cache_len: {}", e))
+        })?;
         let new_cache_len = len_data[0];
 
-        (enc_data_owned, encoder_dim, time_frames, new_cache_channel, new_cache_time, new_cache_len)
+        (
+            enc_data_owned,
+            encoder_dim,
+            time_frames,
+            new_cache_channel,
+            new_cache_time,
+            new_cache_len,
+        )
     };
     // encoder borrow is now released
 
@@ -384,8 +409,9 @@ pub fn process_incremental(
                 // Build decoder frame from cached output
                 let dec_frame = ArrayD::from_shape_vec(
                     IxDyn(&[1, state.decoder_dim, 1]),
-                    state.decoder_output.clone()
-                ).map_err(|e| SttError::InferenceFailed(format!("dec_frame: {}", e)))?;
+                    state.decoder_output.clone(),
+                )
+                .map_err(|e| SttError::InferenceFailed(format!("dec_frame: {}", e)))?;
 
                 // Run joiner in its own scope to release borrow
                 let next_token = {
@@ -404,15 +430,21 @@ pub fn process_incremental(
                         .map_err(|e| SttError::InferenceFailed(format!("Joiner failed: {}", e)))?;
 
                     // Extract logits and find argmax
-                    let logits = joiner_outputs.iter().next()
+                    let logits = joiner_outputs
+                        .iter()
+                        .next()
                         .ok_or_else(|| SttError::InferenceFailed("No joiner output".to_string()))?;
-                    let (_, logits_data) = logits.1.try_extract_tensor::<f32>()
-                        .map_err(|e| SttError::InferenceFailed(format!("Failed to extract logits: {}", e)))?;
+                    let (_, logits_data) = logits.1.try_extract_tensor::<f32>().map_err(|e| {
+                        SttError::InferenceFailed(format!("Failed to extract logits: {}", e))
+                    })?;
 
-                    let mut indexed: Vec<(usize, f32)> = logits_data.iter().enumerate()
+                    let mut indexed: Vec<(usize, f32)> = logits_data
+                        .iter()
+                        .enumerate()
                         .map(|(i, &v)| (i, v))
                         .collect();
-                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    indexed
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                     indexed[0].0 as i64
                 };
@@ -429,15 +461,19 @@ pub fn process_incremental(
 
                 // Update decoder with new token in its own scope
                 {
-                    let decoder = engine.get_decoder_session_mut().ok_or(SttError::NotLoaded)?;
+                    let decoder = engine
+                        .get_decoder_session_mut()
+                        .ok_or(SttError::NotLoaded)?;
 
                     let new_targets = Array2::<i32>::from_elem((1, 1), next_token as i32);
                     let new_target_length = Array1::<i32>::from_elem(1, 1);
 
                     let new_targets_tensor = TensorRef::from_array_view(new_targets.view())
                         .map_err(|e| SttError::InferenceFailed(format!("new_targets: {}", e)))?;
-                    let new_target_length_tensor = TensorRef::from_array_view(new_target_length.view())
-                        .map_err(|e| SttError::InferenceFailed(format!("new_target_length: {}", e)))?;
+                    let new_target_length_tensor =
+                        TensorRef::from_array_view(new_target_length.view()).map_err(|e| {
+                            SttError::InferenceFailed(format!("new_target_length: {}", e))
+                        })?;
                     let h_tensor = TensorRef::from_array_view(state.decoder_h_state.view())
                         .map_err(|e| SttError::InferenceFailed(format!("h_state: {}", e)))?;
                     let c_tensor = TensorRef::from_array_view(state.decoder_c_state.view())
@@ -450,7 +486,9 @@ pub fn process_incremental(
                             "states.1" => h_tensor,
                             "onnx::Slice_3" => c_tensor
                         ])
-                        .map_err(|e| SttError::InferenceFailed(format!("Decoder update failed: {}", e)))?;
+                        .map_err(|e| {
+                            SttError::InferenceFailed(format!("Decoder update failed: {}", e))
+                        })?;
 
                     // Update cached decoder output
                     if let Some(dec_out) = decoder_outputs.get("outputs") {
@@ -462,14 +500,16 @@ pub fn process_incremental(
                     // Update decoder states
                     if let Some(h) = decoder_outputs.get("states") {
                         if let Ok((shape, data)) = h.try_extract_tensor::<f32>() {
-                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                            {
                                 state.decoder_h_state = arr;
                             }
                         }
                     }
                     if let Some(c) = decoder_outputs.get("162") {
                         if let Ok((shape, data)) = c.try_extract_tensor::<f32>() {
-                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()) {
+                            if let Ok(arr) = ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec())
+                            {
                                 state.decoder_c_state = arr;
                             }
                         }
@@ -502,6 +542,16 @@ fn find_token_id(vocab: &[String], token: &str) -> Option<i64> {
     vocab.iter().position(|t| t == token).map(|i| i as i64)
 }
 
+fn chunk_samples_for_source_rate(window_size: usize, source_sample_rate: u32) -> usize {
+    let chunk_samples_16k = window_size * HOP_LENGTH;
+
+    if source_sample_rate != SAMPLE_RATE {
+        (chunk_samples_16k as f64 * source_sample_rate as f64 / SAMPLE_RATE as f64).ceil() as usize
+    } else {
+        chunk_samples_16k
+    }
+}
+
 /// Decode tokens to text (simplified version from stt.rs)
 fn decode_tokens(tokens: &[i64], vocab: &[String]) -> String {
     let mut text = String::new();
@@ -527,16 +577,7 @@ fn decode_tokens(tokens: &[i64], vocab: &[String]) -> String {
         }
     }
 
-    let text = text.trim().to_string();
-
-    // Capitalize first letter
-    if let Some(first_char) = text.chars().next() {
-        let mut result = first_char.to_uppercase().to_string();
-        result.push_str(&text[first_char.len_utf8()..]);
-        return result;
-    }
-
-    text
+    text.trim().to_string()
 }
 
 /// Compute mel spectrogram for audio samples
@@ -547,11 +588,11 @@ fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array
     const WIN_LENGTH: usize = 400;
 
     let n_mels = mel_filterbank.shape()[0];
-    let num_frames = (audio.len().saturating_sub(WIN_LENGTH)) / HOP_LENGTH + 1;
-
-    if num_frames == 0 {
+    if audio.len() < WIN_LENGTH {
         return Array2::<f32>::zeros((n_mels, 0));
     }
+
+    let num_frames = (audio.len().saturating_sub(WIN_LENGTH)) / HOP_LENGTH + 1;
 
     let mut mel_spec = Array2::<f32>::zeros((n_mels, num_frames));
     let mut planner = FftPlanner::new();
@@ -575,7 +616,8 @@ fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array
         fft.process(&mut fft_buffer);
 
         // Power spectrum
-        let power_spec: Vec<f32> = fft_buffer.iter()
+        let power_spec: Vec<f32> = fft_buffer
+            .iter()
             .take(N_FFT / 2 + 1)
             .map(|c| c.norm_sqr())
             .collect();
@@ -591,4 +633,81 @@ fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array
     }
 
     mel_spec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_vocab() -> Vec<String> {
+        vec![
+            "<blk>".to_string(),
+            "\u{2581}hello".to_string(),
+            "\u{2581}world".to_string(),
+            "!".to_string(),
+            "<space>".to_string(),
+            "<noise>".to_string(),
+        ]
+    }
+
+    #[test]
+    fn test_find_token_id() {
+        let vocab = test_vocab();
+
+        assert_eq!(find_token_id(&vocab, "<blk>"), Some(0));
+        assert_eq!(find_token_id(&vocab, "\u{2581}world"), Some(2));
+        assert_eq!(find_token_id(&vocab, "<missing>"), None);
+    }
+
+    #[test]
+    fn test_decode_tokens_ignores_special_and_out_of_range_tokens() {
+        let vocab = test_vocab();
+        let tokens = vec![1, 2, 3, 4, 5, 99, -1];
+
+        assert_eq!(decode_tokens(&tokens, &vocab), "hello world!");
+    }
+
+    #[test]
+    fn test_partial_text_uses_accumulated_tokens() {
+        let vocab = test_vocab();
+        let state = StreamingState {
+            cache_channel: ArrayD::<f32>::zeros(IxDyn(&[1, 1, 1, 1])),
+            cache_time: ArrayD::<f32>::zeros(IxDyn(&[1, 1, 1, 1])),
+            cache_len: 0,
+            decoder_h_state: ArrayD::<f32>::zeros(IxDyn(&[2, 1, 4])),
+            decoder_c_state: ArrayD::<f32>::zeros(IxDyn(&[2, 1, 4])),
+            decoder_output: vec![0.0; 4],
+            tokens: vec![1, 2, 3],
+            chunk_count: 0,
+            processed_samples: 0,
+            source_sample_rate: SAMPLE_RATE,
+            metadata: StreamingMetadata::default(),
+            vocab,
+            mel_filterbank: Array2::<f32>::zeros((N_MELS, 257)),
+            blank_id: 0,
+            decoder_dim: 4,
+        };
+
+        assert_eq!(state.get_partial_text(), "hello world!");
+    }
+
+    #[test]
+    fn test_chunk_samples_for_source_rate() {
+        assert_eq!(chunk_samples_for_source_rate(112, SAMPLE_RATE), 17_920);
+        assert_eq!(chunk_samples_for_source_rate(112, 48_000), 53_760);
+        assert_eq!(chunk_samples_for_source_rate(112, 44_100), 49_392);
+    }
+
+    #[test]
+    fn test_compute_mel_spectrogram_empty_and_shape() {
+        let mel_filterbank = Array2::<f32>::ones((N_MELS, 257));
+
+        let empty = compute_mel_spectrogram(&[], &mel_filterbank);
+        assert_eq!(empty.shape(), &[N_MELS, 0]);
+
+        let audio = vec![0.0; 400 + HOP_LENGTH * 2];
+        let spec = compute_mel_spectrogram(&audio, &mel_filterbank);
+        assert_eq!(spec.shape(), &[N_MELS, 3]);
+        assert!(spec.iter().all(|value| value.is_finite()));
+    }
 }

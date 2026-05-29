@@ -4,8 +4,9 @@
 //!
 //! # Privacy Guarantees
 //!
-//! 1. **No network calls during dictation**: After model download, all processing
-//!    is local. No audio or transcription data is ever sent to any server.
+//! 1. **No network calls during dictation**: Model and VAD downloads use HTTP,
+//!    but active dictation processing is local. No audio or transcription data is
+//!    ever sent to any server.
 //!
 //! 2. **Audio buffer cleanup**: Audio buffers are cleared immediately after
 //!    transcription completes. No audio data is stored or cached.
@@ -43,16 +44,16 @@ impl Default for PrivacyConfig {
     }
 }
 
-/// Verify that no network calls are being made during dictation
+/// Verify that no network calls are made during dictation
 ///
 /// This is a compile-time guarantee enforced by architecture:
 /// - The STT module uses only local ONNX models
-/// - No HTTP client libraries are included in the tray app dependencies
-/// - Model download happens through the CLI before the tray app starts
+/// - HTTP code is limited to model/VAD download paths
+/// - Transcription and text injection do not call network APIs
 pub const fn verify_no_network_during_dictation() -> bool {
     // This function exists to document the guarantee
-    // The actual guarantee is enforced by not including network libraries
-    // in the tray app's critical path
+    // The actual guarantee is enforced by keeping network code out of
+    // the tray app's dictation critical path
     true
 }
 
@@ -73,7 +74,7 @@ pub fn secure_clear_audio_buffer(buffer: &mut Vec<f32>) {
 /// Privacy audit result
 #[derive(Debug)]
 pub struct PrivacyAudit {
-    pub no_network_libraries: bool,
+    pub no_network_during_dictation: bool,
     pub no_telemetry_endpoints: bool,
     pub audio_cleared_after_use: bool,
     pub clipboard_restored: bool,
@@ -85,7 +86,7 @@ impl PrivacyAudit {
     pub fn run(config: &PrivacyConfig) -> Self {
         Self {
             // These are compile-time guarantees
-            no_network_libraries: true, // No reqwest/hyper in tray app deps
+            no_network_during_dictation: true,
             no_telemetry_endpoints: true, // No analytics code present
             // These depend on configuration
             audio_cleared_after_use: config.clear_audio_after_transcription,
@@ -97,7 +98,7 @@ impl PrivacyAudit {
 
     /// Check if all privacy guarantees are met
     pub fn all_passed(&self) -> bool {
-        self.no_network_libraries
+        self.no_network_during_dictation
             && self.no_telemetry_endpoints
             && self.audio_cleared_after_use
             && self.clipboard_restored
@@ -109,8 +110,8 @@ impl PrivacyAudit {
         let mut lines = Vec::new();
 
         lines.push(format!(
-            "[{}] No network libraries in dictation path",
-            if self.no_network_libraries {
+            "[{}] No network calls during dictation",
+            if self.no_network_during_dictation {
                 "✓"
             } else {
                 "✗"

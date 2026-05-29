@@ -41,13 +41,13 @@ pub enum VocabType {
 pub enum FileRole {
     Encoder,
     Decoder,
-    DecoderWithPast,  // For KV-cache models
-    Joiner,           // For transducer models
+    DecoderWithPast, // For KV-cache models
+    Joiner,          // For transducer models
     Vocab,
     Preprocessor,
-    Embeddings,       // For Canary
+    Embeddings, // For Canary
     Config,
-    EncoderData,      // External data files for large models
+    EncoderData, // External data files for large models
     DecoderData,
     EmbeddingsData,
 }
@@ -106,46 +106,142 @@ pub struct ModelDefinition {
 
 /// Parakeet TDT v2 files (English-only, INT8)
 const PARAKEET_V2_FILES: &[ModelFile] = &[
-    ModelFile { name: "encoder-model.int8.onnx", role: FileRole::Encoder, required: true },
-    ModelFile { name: "decoder_joint-model.int8.onnx", role: FileRole::Decoder, required: true },
-    ModelFile { name: "nemo128.onnx", role: FileRole::Preprocessor, required: false },
-    ModelFile { name: "vocab.txt", role: FileRole::Vocab, required: true },
-    ModelFile { name: "config.json", role: FileRole::Config, required: false },
+    ModelFile {
+        name: "encoder-model.int8.onnx",
+        role: FileRole::Encoder,
+        required: true,
+    },
+    ModelFile {
+        name: "decoder_joint-model.int8.onnx",
+        role: FileRole::Decoder,
+        required: true,
+    },
+    ModelFile {
+        name: "nemo128.onnx",
+        role: FileRole::Preprocessor,
+        required: false,
+    },
+    ModelFile {
+        name: "vocab.txt",
+        role: FileRole::Vocab,
+        required: true,
+    },
+    ModelFile {
+        name: "config.json",
+        role: FileRole::Config,
+        required: false,
+    },
 ];
 
 /// Parakeet TDT v3 files (Multilingual, INT8)
 const PARAKEET_V3_FILES: &[ModelFile] = &[
-    ModelFile { name: "encoder-model.int8.onnx", role: FileRole::Encoder, required: true },
-    ModelFile { name: "decoder_joint-model.int8.onnx", role: FileRole::Decoder, required: true },
-    ModelFile { name: "nemo128.onnx", role: FileRole::Preprocessor, required: false },
-    ModelFile { name: "vocab.txt", role: FileRole::Vocab, required: true },
-    ModelFile { name: "config.json", role: FileRole::Config, required: false },
+    ModelFile {
+        name: "encoder-model.int8.onnx",
+        role: FileRole::Encoder,
+        required: true,
+    },
+    ModelFile {
+        name: "decoder_joint-model.int8.onnx",
+        role: FileRole::Decoder,
+        required: true,
+    },
+    ModelFile {
+        name: "nemo128.onnx",
+        role: FileRole::Preprocessor,
+        required: false,
+    },
+    ModelFile {
+        name: "vocab.txt",
+        role: FileRole::Vocab,
+        required: true,
+    },
+    ModelFile {
+        name: "config.json",
+        role: FileRole::Config,
+        required: false,
+    },
 ];
 
 /// Nemotron Streaming files (INT8)
 const NEMOTRON_STREAMING_FILES: &[ModelFile] = &[
-    ModelFile { name: "encoder.int8.onnx", role: FileRole::Encoder, required: true },
-    ModelFile { name: "decoder.int8.onnx", role: FileRole::Decoder, required: true },
-    ModelFile { name: "joiner.int8.onnx", role: FileRole::Joiner, required: true },
-    ModelFile { name: "tokens.txt", role: FileRole::Vocab, required: true },
+    ModelFile {
+        name: "encoder.int8.onnx",
+        role: FileRole::Encoder,
+        required: true,
+    },
+    ModelFile {
+        name: "decoder.int8.onnx",
+        role: FileRole::Decoder,
+        required: true,
+    },
+    ModelFile {
+        name: "joiner.int8.onnx",
+        role: FileRole::Joiner,
+        required: true,
+    },
+    ModelFile {
+        name: "tokens.txt",
+        role: FileRole::Vocab,
+        required: true,
+    },
 ];
 
 /// Whisper Large v3 Turbo files (INT8)
 const WHISPER_INT8_FILES: &[ModelFile] = &[
-    ModelFile { name: "onnx/encoder_model_int8.onnx", role: FileRole::Encoder, required: true },
-    ModelFile { name: "onnx/decoder_model_int8.onnx", role: FileRole::Decoder, required: true },
-    ModelFile { name: "tokenizer.json", role: FileRole::Vocab, required: true },
-    ModelFile { name: "config.json", role: FileRole::Config, required: false },
-    ModelFile { name: "generation_config.json", role: FileRole::Config, required: false },
+    ModelFile {
+        name: "onnx/encoder_model_int8.onnx",
+        role: FileRole::Encoder,
+        required: true,
+    },
+    ModelFile {
+        name: "onnx/decoder_model_int8.onnx",
+        role: FileRole::Decoder,
+        required: true,
+    },
+    ModelFile {
+        name: "tokenizer.json",
+        role: FileRole::Vocab,
+        required: true,
+    },
+    ModelFile {
+        name: "config.json",
+        role: FileRole::Config,
+        required: false,
+    },
+    ModelFile {
+        name: "generation_config.json",
+        role: FileRole::Config,
+        required: false,
+    },
 ];
 
 /// Whisper Large v3 Turbo files (FP16)
 const WHISPER_FP16_FILES: &[ModelFile] = &[
-    ModelFile { name: "onnx/encoder_model_fp16.onnx", role: FileRole::Encoder, required: true },
-    ModelFile { name: "onnx/decoder_model_fp16.onnx", role: FileRole::Decoder, required: true },
-    ModelFile { name: "tokenizer.json", role: FileRole::Vocab, required: true },
-    ModelFile { name: "config.json", role: FileRole::Config, required: false },
-    ModelFile { name: "generation_config.json", role: FileRole::Config, required: false },
+    ModelFile {
+        name: "onnx/encoder_model_fp16.onnx",
+        role: FileRole::Encoder,
+        required: true,
+    },
+    ModelFile {
+        name: "onnx/decoder_model_fp16.onnx",
+        role: FileRole::Decoder,
+        required: true,
+    },
+    ModelFile {
+        name: "tokenizer.json",
+        role: FileRole::Vocab,
+        required: true,
+    },
+    ModelFile {
+        name: "config.json",
+        role: FileRole::Config,
+        required: false,
+    },
+    ModelFile {
+        name: "generation_config.json",
+        role: FileRole::Config,
+        required: false,
+    },
 ];
 
 /// All available models
@@ -178,7 +274,9 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
         repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
         files: PARAKEET_V3_FILES,
         size_bytes: 670_000_000,
-        languages: &["en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "uk", "ja", "ko", "zh"],
+        languages: &[
+            "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "uk", "ja", "ko", "zh",
+        ],
         is_default: true,
         config: ModelConfig {
             vocab_type: VocabType::TextFile,
@@ -254,7 +352,10 @@ pub fn get_model_definition(model_id: &str) -> Option<&'static ModelDefinition> 
 
 /// Get the default model definition
 pub fn get_default_model() -> &'static ModelDefinition {
-    MODEL_REGISTRY.iter().find(|m| m.is_default).expect("No default model defined")
+    MODEL_REGISTRY
+        .iter()
+        .find(|m| m.is_default)
+        .expect("No default model defined")
 }
 
 /// Get all available model definitions
@@ -280,7 +381,8 @@ pub fn normalize_model_name(name: &str) -> &str {
 
 /// VAD model constants
 pub const VAD_MODEL_NAME: &str = "silero-vad";
-pub const VAD_MODEL_URL: &str = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
+pub const VAD_MODEL_URL: &str =
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
 pub const VAD_MODEL_FILENAME: &str = "silero_vad.onnx";
 
 /// Model metadata stored alongside each model
@@ -474,15 +576,15 @@ fn build_download_url(repo: &str, file: &str) -> String {
 /// Download a model synchronously (blocking)
 /// This is used for the tray app which runs downloads in a separate thread
 pub fn download_model_sync(model_id: &str, _variant: &str) -> Result<PathBuf, String> {
-    use crate::state::{DownloadState, DOWNLOAD_STATE, DOWNLOAD_IN_PROGRESS};
+    use crate::state::{DownloadState, DOWNLOAD_IN_PROGRESS, DOWNLOAD_STATE};
     use std::sync::atomic::Ordering;
 
     // Normalize legacy model names
     let model_id = normalize_model_name(model_id);
 
     // Get model definition from registry
-    let model_def = get_model_definition(model_id)
-        .ok_or_else(|| format!("Unknown model: {}", model_id))?;
+    let model_def =
+        get_model_definition(model_id).ok_or_else(|| format!("Unknown model: {}", model_id))?;
 
     let model_dir = get_model_path(model_id);
 
@@ -541,7 +643,13 @@ pub fn download_model_sync(model_id: &str, _variant: &str) -> Result<PathBuf, St
             };
         }
 
-        crate::log_info!("models", "Downloading {} ({}/{})...", file, index + 1, total_files);
+        crate::log_info!(
+            "models",
+            "Downloading {} ({}/{})...",
+            file,
+            index + 1,
+            total_files
+        );
 
         // Create progress callback that updates the global state
         let model_id_clone = model_id.to_string();
@@ -659,23 +767,36 @@ pub fn get_download_status() -> Option<String> {
                 let percent = (*bytes_downloaded as f64 / *total_bytes as f64 * 100.0) as u32;
                 let downloaded_mb = *bytes_downloaded as f64 / 1_000_000.0;
                 let total_mb = *total_bytes as f64 / 1_000_000.0;
-                Some(format!("Downloading: {:.0}/{:.0} MB ({}%) - file {}/{}",
-                    downloaded_mb, total_mb, percent, file_index + 1, total_files))
+                Some(format!(
+                    "Downloading: {:.0}/{:.0} MB ({}%) - file {}/{}",
+                    downloaded_mb,
+                    total_mb,
+                    percent,
+                    file_index + 1,
+                    total_files
+                ))
             } else if *file_total_bytes > 0 {
                 // Show file progress if we know file size
-                let percent = (*file_bytes_downloaded as f64 / *file_total_bytes as f64 * 100.0) as u32;
-                Some(format!("Downloading: {} ({}%) - {}/{}",
-                    current_file, percent, file_index + 1, total_files))
+                let percent =
+                    (*file_bytes_downloaded as f64 / *file_total_bytes as f64 * 100.0) as u32;
+                Some(format!(
+                    "Downloading: {} ({}%) - {}/{}",
+                    current_file,
+                    percent,
+                    file_index + 1,
+                    total_files
+                ))
             } else {
-                Some(format!("Downloading: {} ({}/{})", current_file, file_index + 1, total_files))
+                Some(format!(
+                    "Downloading: {} ({}/{})",
+                    current_file,
+                    file_index + 1,
+                    total_files
+                ))
             }
         }
-        DownloadState::Completed { model_name } => {
-            Some(format!("Completed: {}", model_name))
-        }
-        DownloadState::Failed { error, .. } => {
-            Some(format!("Failed: {}", error))
-        }
+        DownloadState::Completed { model_name } => Some(format!("Completed: {}", model_name)),
+        DownloadState::Failed { error, .. } => Some(format!("Failed: {}", error)),
     }
 }
 
@@ -707,8 +828,8 @@ pub fn download_file_with_progress(
         .unwrap_or(0);
 
     // Create output file
-    let mut file = fs::File::create(dest_path)
-        .map_err(|e| format!("Failed to create file: {}", e))?;
+    let mut file =
+        fs::File::create(dest_path).map_err(|e| format!("Failed to create file: {}", e))?;
 
     // Read response body in chunks with progress reporting
     let mut reader = response.into_reader();
@@ -762,9 +883,12 @@ pub fn remove_model(model_name: &str) -> bool {
 pub fn clean_models() -> Vec<String> {
     let models = list_models();
     let mut removed = Vec::new();
+    let active_model = crate::config::load_config()
+        .map(|config| normalize_model_name(&config.model).to_string())
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
     for model in models {
-        if !model.is_default {
+        if !model.is_default && normalize_model_name(&model.name) != active_model {
             if remove_model(&model.name) {
                 removed.push(model.name);
             }

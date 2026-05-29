@@ -7,13 +7,11 @@ import {
   downloadModel,
   cleanModels,
   DEFAULT_MODEL,
-  isDefaultModelInstalled,
   isModelInstalled,
   getAvailableModels,
   getModelDefinition,
   getDefaultModelDefinition,
   formatBytes,
-  type ModelDefinition,
 } from '@dybur/core';
 import { getModelsDir, loadConfig, updateConfig } from '@dybur/config';
 import {
@@ -27,7 +25,6 @@ import {
   cyan,
   dim,
   green,
-  yellow,
   formatSize,
   formatPath,
   progressBar,
@@ -39,7 +36,9 @@ import {
 function showModelsHelp(): void {
   header('Model Management');
 
-  console.log(`  ${dim('dybur supports multiple STT models with different accuracy/speed tradeoffs.')}`);
+  console.log(
+    `  ${dim('dybur supports multiple STT models with different accuracy/speed tradeoffs.')}`
+  );
   console.log(`  ${dim('Models are downloaded from HuggingFace.')}`);
   console.log('');
 
@@ -58,7 +57,9 @@ function showModelsHelp(): void {
   console.log(`  ${brand.accent('Examples')}`);
   console.log(`  ${cyan('dybur m d')}                    ${dim('Interactive model download')}`);
   console.log(`  ${cyan('dybur m s')}                    ${dim('Interactive model selection')}`);
-  console.log(`  ${cyan('dybur m d whisper-large-v3-turbo-int8')}  ${dim('Download specific model')}`);
+  console.log(
+    `  ${cyan('dybur m d whisper-large-v3-turbo-int8')}  ${dim('Download specific model')}`
+  );
   console.log('');
 
   const defaultModel = getDefaultModelDefinition();
@@ -133,7 +134,7 @@ async function listCommand(showAvailable: boolean = false): Promise<void> {
     info('No models installed');
     console.log('');
     console.log(`  ${dim('To install the default model:')}`);
-    console.log(`  ${cyan('dybur models prefetch')}`);
+    console.log(`  ${cyan(`dybur models download ${DEFAULT_MODEL}`)}`);
     console.log('');
     console.log(`  ${dim('To see all available models:')}`);
     console.log(`  ${cyan('dybur models list --available')}`);
@@ -230,7 +231,7 @@ async function selectModelForDownload(): Promise<string | undefined> {
   });
 
   // User cancelled or selected separator
-  if (selected === undefined || selected === '__separator__') {
+  if (selected === null || selected === '__separator__') {
     return undefined;
   }
 
@@ -349,7 +350,7 @@ async function selectModelForSet(): Promise<string | undefined> {
     return {
       label: modelDef?.displayName ?? model.name,
       value: model.name,
-      hint: isActive ? cyan('[active]') : modelDef?.description ?? '',
+      hint: isActive ? cyan('[active]') : (modelDef?.description ?? ''),
     };
   });
 
@@ -362,7 +363,7 @@ async function selectModelForSet(): Promise<string | undefined> {
     initial: currentIndex >= 0 ? currentIndex : 0,
   });
 
-  return selected;
+  return selected ?? undefined;
 }
 
 /**
@@ -460,25 +461,28 @@ export async function modelsCommand(args: string[]): Promise<void> {
 
   switch (subcommand) {
     case 'list':
-    case 'l':
+    case 'l': {
       // Check for --available flag
       const showAvailable = args.includes('--available') || args.includes('-a');
       await listCommand(showAvailable);
       break;
+    }
 
     case 'download':
-    case 'd':
+    case 'd': {
       // Download a model - interactive if no ID provided
       const downloadModelId = args[1];
       await downloadCommand(downloadModelId);
       break;
+    }
 
     case 'set':
-    case 's':
+    case 's': {
       // Set active model - interactive if no ID provided
       const setModelId = args[1];
       await setCommand(setModelId);
       break;
+    }
 
     case 'prefetch':
       await prefetchCommand();

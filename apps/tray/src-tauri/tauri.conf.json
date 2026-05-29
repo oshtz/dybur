@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "dybur",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "identifier": "com.dybur.tray",
   "build": {
     "beforeDevCommand": "",
@@ -14,7 +14,7 @@
     "macOSPrivateApi": true,
     "windows": [],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'"
     }
   },
   "bundle": {

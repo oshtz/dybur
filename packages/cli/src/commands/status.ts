@@ -5,7 +5,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { loadConfig, getAllPaths, isMacOS, isWindows } from '@dybur/config';
-import { isDefaultModelInstalled, getModelMetadata, DEFAULT_MODEL } from '@dybur/core';
+import { isModelInstalled, getModelMetadata, DEFAULT_MODEL } from '@dybur/core';
 import {
   header,
   success,
@@ -48,10 +48,11 @@ function statusIcon(ok: boolean): string {
 export async function statusCommand(_args: string[]): Promise<void> {
   header('dybur Status');
 
-  const running = await isTrayRunning();
-  const modelInstalled = isDefaultModelInstalled();
-  const modelMeta = modelInstalled ? getModelMetadata(DEFAULT_MODEL) : null;
   const config = loadConfig({ createIfMissing: false });
+  const activeModel = config.model ?? DEFAULT_MODEL;
+  const running = await isTrayRunning();
+  const modelInstalled = isModelInstalled(activeModel);
+  const modelMeta = modelInstalled ? getModelMetadata(activeModel) : null;
   const paths = getAllPaths();
 
   // Service status
@@ -59,7 +60,7 @@ export async function statusCommand(_args: string[]): Promise<void> {
     `  ${statusIcon(running)} ${dim('Service:')}     ${running ? green('Running') : red('Stopped')}`
   );
   console.log(
-    `  ${statusIcon(modelInstalled)} ${dim('Model:')}       ${modelInstalled ? green(DEFAULT_MODEL) : red('Not installed')}`
+    `  ${statusIcon(modelInstalled)} ${dim('Model:')}       ${modelInstalled ? green(activeModel) : red(`${activeModel} not installed`)}`
   );
 
   if (modelMeta) {
@@ -83,7 +84,9 @@ export async function statusCommand(_args: string[]): Promise<void> {
     `  ${dim('Sentence case:')} ${config.sentenceCase ? green('enabled') : dim('disabled')}`
   );
   console.log(`  ${dim('Silence timeout:')} ${config.silenceTimeoutMs}ms`);
-  console.log(`  ${dim('Recording mode:')} ${config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle'}`);
+  console.log(
+    `  ${dim('Recording mode:')} ${config.recordingMode === 'push_to_talk' ? 'push-to-talk' : 'toggle'}`
+  );
 
   console.log('');
   divider();
@@ -104,7 +107,7 @@ export async function statusCommand(_args: string[]): Promise<void> {
     success(`Ready ${dim('- press')} ${brand.accent(config.hotkey)} ${dim('to dictate')}`);
   } else if (!modelInstalled) {
     warning('Model required');
-    info(`Run ${cyan('dybur models prefetch')} to download`);
+    info(`Run ${cyan(`dybur models download ${activeModel}`)} to download`);
   } else {
     warning('Service not running');
     info(`Run ${cyan('dybur start')} to begin`);

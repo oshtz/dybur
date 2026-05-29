@@ -21,25 +21,25 @@ mod stt;
 mod tokenizer;
 mod vad;
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
 };
-use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-use audio::{AudioCapture, get_audio_error_help, list_input_devices};
+use audio::{get_audio_error_help, list_input_devices, AudioCapture};
 use config::{get_config_path, save_config};
 use injection::inject_text;
 use models::{
-    format_bytes, is_download_in_progress, get_download_status, is_model_installed,
-    get_available_models, get_model_definition, normalize_model_name,
+    format_bytes, get_available_models, get_download_status, get_model_definition,
+    is_download_in_progress, is_model_installed, normalize_model_name,
 };
 use state::{AppState, RecordingState};
-use stt::{SttEngine, get_model_paths};
+use stt::{get_model_paths, SttEngine};
 
 // Thread-local storage for AudioCapture (not Send+Sync due to cpal::Stream)
 // Note: Only used to keep the stream alive, not for data retrieval
@@ -49,7 +49,7 @@ thread_local! {
 
 // Global audio buffer for cross-thread access (the buffer Arc IS Send+Sync)
 lazy_static::lazy_static! {
-    static ref RECORDING_BUFFER: Mutex<Option<std::sync::Arc<std::sync::Mutex<Vec<f32>>>>> = Mutex::new(None);
+    static ref RECORDING_BUFFER: Mutex<Option<Arc<Mutex<Vec<f32>>>>> = Mutex::new(None);
 }
 
 // Global sample rate for the recording buffer (needed for resampling)
@@ -101,6 +101,7 @@ fn main() {
             ftue::ftue_skip,
             ftue::ftue_check_model_installed,
             ftue::ftue_close,
+            ftue::ftue_get_models,
         ])
         .setup(|app| {
             // Load configuration
@@ -136,7 +137,8 @@ fn main() {
             } else {
                 log_warn!(
                     "model",
-                    "STT model '{}' not found. Run 'dybur models prefetch' to download it.",
+                    "STT model '{}' not found. Run 'dybur models download {}' to download it.",
+                    model_name,
                     model_name
                 );
             }
@@ -150,7 +152,11 @@ fn main() {
                         log_info!("vad", "VAD model loaded and ready");
                     }
                     Err(e) => {
-                        log_warn!("vad", "Failed to load VAD model: {} (VAD filtering disabled)", e);
+                        log_warn!(
+                            "vad",
+                            "Failed to load VAD model: {} (VAD filtering disabled)",
+                            e
+                        );
                     }
                 }
             } else {
@@ -166,7 +172,11 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        log_warn!("vad", "Failed to download VAD model: {} (VAD filtering disabled)", e);
+                        log_warn!(
+                            "vad",
+                            "Failed to download VAD model: {} (VAD filtering disabled)",
+                            e
+                        );
                     }
                 }
             }
@@ -202,7 +212,10 @@ fn main() {
             // Register global hotkey
             let (hotkey, recording_mode) = {
                 let state_guard = state.inner().lock().unwrap();
-                (state_guard.config.hotkey.clone(), state_guard.config.recording_mode.clone())
+                (
+                    state_guard.config.hotkey.clone(),
+                    state_guard.config.recording_mode.clone(),
+                )
             };
 
             if let Err(e) = register_hotkey(app.handle(), &hotkey, &recording_mode) {
@@ -278,34 +291,31 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     // Recording mode submenu
     let recording_mode_submenu = build_recording_mode_submenu(app)?;
 
-    // VAD toggle
-    let vad_toggle = build_vad_toggle(app)?;
+    // VAD controls
+    let vad_submenu = build_vad_submenu(app)?;
 
     // GPU mode submenu
     let gpu_mode_submenu = build_gpu_mode_submenu(app)?;
 
     // Settings submenu
     let open_config = MenuItemBuilder::with_id("open_config", "Open Config File").build(app)?;
-    let run_diagnostics = MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
+    let run_diagnostics =
+        MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
     let run_setup = MenuItemBuilder::with_id("run_setup", "Run Setup Wizard...").build(app)?;
     #[cfg(not(target_os = "windows"))]
-    let install_cli = MenuItemBuilder::with_id("install_cli", "Install Command Line Tool...").build(app)?;
+    let install_cli =
+        MenuItemBuilder::with_id("install_cli", "Install Command Line Tool...").build(app)?;
     let about = MenuItemBuilder::with_id("about", "About dybur").build(app)?;
 
-    let mut settings_builder = SubmenuBuilder::with_id(app, "settings", "Settings")
+    let settings_builder = SubmenuBuilder::with_id(app, "settings", "Settings")
         .item(&open_config)
         .item(&run_diagnostics)
         .item(&run_setup);
 
     #[cfg(not(target_os = "windows"))]
-    {
-        settings_builder = settings_builder.item(&install_cli);
-    }
+    let settings_builder = settings_builder.item(&install_cli);
 
-    let settings_submenu = settings_builder
-        .separator()
-        .item(&about)
-        .build()?;
+    let settings_submenu = settings_builder.separator().item(&about).build()?;
 
     // Main menu items
     let logs = MenuItemBuilder::with_id("logs", "Open Logs").build(app)?;
@@ -318,7 +328,7 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .item(&models_submenu)
         .item(&devices_submenu)
         .item(&recording_mode_submenu)
-        .item(&vad_toggle)
+        .item(&vad_submenu)
         .item(&gpu_mode_submenu)
         .separator()
         .item(&settings_submenu)
@@ -329,7 +339,9 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
 }
 
 /// Build the Models submenu
-fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+fn build_models_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "models", "Models");
 
     // Get current selected model from config
@@ -361,7 +373,10 @@ fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<t
         let prefix = if is_selected { "● " } else { "  " };
         let suffix = if is_installed { "" } else { " [Not installed]" };
 
-        let label = format!("{}{} ({}){}", prefix, model_def.display_name, size_str, suffix);
+        let label = format!(
+            "{}{} ({}){}",
+            prefix, model_def.display_name, size_str, suffix
+        );
 
         // Can select if installed and not currently downloading
         // Can trigger download if not installed
@@ -380,14 +395,17 @@ fn build_models_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<t
     submenu = submenu.separator();
 
     // Clean unused models button
-    let clean_models = MenuItemBuilder::with_id("clean_models", "Remove Unused Models").build(app)?;
+    let clean_models =
+        MenuItemBuilder::with_id("clean_models", "Remove Unused Models").build(app)?;
     submenu = submenu.item(&clean_models);
 
     submenu.build()
 }
 
 /// Build the Devices submenu
-fn build_devices_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+fn build_devices_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "devices", "Devices");
 
     // Get current configured device
@@ -412,7 +430,10 @@ fn build_devices_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<
     // List available devices
     let devices = list_input_devices();
     for device in &devices {
-        let is_selected = configured_device.as_ref().map(|d| d == &device.name).unwrap_or(false);
+        let is_selected = configured_device
+            .as_ref()
+            .map(|d| d == &device.name)
+            .unwrap_or(false);
         let prefix = if is_selected { "● " } else { "  " };
         let suffix = if device.is_default { " (default)" } else { "" };
         let label = format!("{}{}{}", prefix, device.name, suffix);
@@ -436,12 +457,20 @@ fn build_devices_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<
 /// Sanitize a string to be a valid menu ID
 fn sanitize_menu_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 /// Build the Recording Mode submenu
-fn build_recording_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+fn build_recording_mode_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "recording_mode", "Recording Mode");
 
     // Get current recording mode
@@ -476,7 +505,9 @@ fn build_recording_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::S
 }
 
 /// Build VAD toggle menu item
-fn build_vad_toggle(app: &tauri::AppHandle) -> Result<tauri::menu::MenuItem<tauri::Wry>, tauri::Error> {
+fn build_vad_toggle(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::MenuItem<tauri::Wry>, tauri::Error> {
     let state = app.state::<Mutex<AppState>>();
     let vad_enabled = {
         let state_guard = state.inner().lock().unwrap();
@@ -492,8 +523,112 @@ fn build_vad_toggle(app: &tauri::AppHandle) -> Result<tauri::menu::MenuItem<taur
     MenuItemBuilder::with_id("vad_toggle", label).build(app)
 }
 
+/// Build VAD controls submenu
+fn build_vad_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+    let state = app.state::<Mutex<AppState>>();
+    let (vad_threshold, vad_min_speech_ms, silence_timeout_ms) = {
+        let state_guard = state.inner().lock().unwrap();
+        (
+            state_guard.config.vad_threshold,
+            state_guard.config.vad_min_speech_ms,
+            state_guard.config.silence_timeout_ms,
+        )
+    };
+
+    let mut submenu = SubmenuBuilder::with_id(app, "vad", "Voice Activity Detection");
+
+    let toggle_item = build_vad_toggle(app)?;
+    submenu = submenu.item(&toggle_item);
+
+    let status = MenuItemBuilder::with_id(
+        "vad_status",
+        format!(
+            "Threshold {:.2} / Speech {}ms / Silence {}ms",
+            vad_threshold, vad_min_speech_ms, silence_timeout_ms
+        ),
+    )
+    .enabled(false)
+    .build(app)?;
+    submenu = submenu.item(&status).separator();
+
+    let threshold_header = MenuItemBuilder::with_id("vad_threshold_header", "Threshold")
+        .enabled(false)
+        .build(app)?;
+    submenu = submenu.item(&threshold_header);
+    for (id, value, label) in [
+        ("vad_threshold_035", 0.35_f32, "Sensitive - 0.35"),
+        ("vad_threshold_050", 0.50_f32, "Balanced - 0.50"),
+        ("vad_threshold_065", 0.65_f32, "Strict - 0.65"),
+    ] {
+        let item = MenuItemBuilder::with_id(
+            id,
+            format!(
+                "{}{}",
+                selection_prefix(approx_eq_f32(vad_threshold, value)),
+                label
+            ),
+        )
+        .build(app)?;
+        submenu = submenu.item(&item);
+    }
+
+    submenu = submenu.separator();
+    let min_speech_header = MenuItemBuilder::with_id("vad_min_speech_header", "Minimum Speech")
+        .enabled(false)
+        .build(app)?;
+    submenu = submenu.item(&min_speech_header);
+    for (id, value, label) in [
+        ("vad_min_speech_150", 150_u32, "Short - 150ms"),
+        ("vad_min_speech_250", 250_u32, "Balanced - 250ms"),
+        ("vad_min_speech_500", 500_u32, "Deliberate - 500ms"),
+    ] {
+        let item = MenuItemBuilder::with_id(
+            id,
+            format!("{}{}", selection_prefix(vad_min_speech_ms == value), label),
+        )
+        .build(app)?;
+        submenu = submenu.item(&item);
+    }
+
+    submenu = submenu.separator();
+    let silence_header = MenuItemBuilder::with_id("vad_silence_header", "Silence Timeout")
+        .enabled(false)
+        .build(app)?;
+    submenu = submenu.item(&silence_header);
+    for (id, value, label) in [
+        ("vad_silence_700", 700_u32, "Responsive - 700ms"),
+        ("vad_silence_1000", 1000_u32, "Balanced - 1000ms"),
+        ("vad_silence_1500", 1500_u32, "Patient - 1500ms"),
+    ] {
+        let item = MenuItemBuilder::with_id(
+            id,
+            format!("{}{}", selection_prefix(silence_timeout_ms == value), label),
+        )
+        .build(app)?;
+        submenu = submenu.item(&item);
+    }
+
+    submenu.build()
+}
+
+fn selection_prefix(selected: bool) -> &'static str {
+    if selected {
+        "[x] "
+    } else {
+        "[ ] "
+    }
+}
+
+fn approx_eq_f32(left: f32, right: f32) -> bool {
+    (left - right).abs() < 0.001
+}
+
 /// Build GPU mode submenu
-fn build_gpu_mode_submenu(app: &tauri::AppHandle) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
+fn build_gpu_mode_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, tauri::Error> {
     let mut submenu = SubmenuBuilder::with_id(app, "gpu_mode", "GPU Acceleration");
 
     let state = app.state::<Mutex<AppState>>();
@@ -570,7 +705,10 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
             let device_name = id.strip_prefix("device_").unwrap();
             // Reverse the sanitization to find the actual device
             let devices = list_input_devices();
-            if let Some(device) = devices.iter().find(|d| sanitize_menu_id(&d.name) == device_name) {
+            if let Some(device) = devices
+                .iter()
+                .find(|d| sanitize_menu_id(&d.name) == device_name)
+            {
                 select_device(app, Some(device.name.clone()));
             }
         }
@@ -582,6 +720,33 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         }
         "vad_toggle" => {
             toggle_vad(app);
+        }
+        "vad_threshold_035" => {
+            set_vad_threshold(app, 0.35);
+        }
+        "vad_threshold_050" => {
+            set_vad_threshold(app, 0.50);
+        }
+        "vad_threshold_065" => {
+            set_vad_threshold(app, 0.65);
+        }
+        "vad_min_speech_150" => {
+            set_vad_min_speech_ms(app, 150);
+        }
+        "vad_min_speech_250" => {
+            set_vad_min_speech_ms(app, 250);
+        }
+        "vad_min_speech_500" => {
+            set_vad_min_speech_ms(app, 500);
+        }
+        "vad_silence_700" => {
+            set_vad_silence_timeout_ms(app, 700);
+        }
+        "vad_silence_1000" => {
+            set_vad_silence_timeout_ms(app, 1000);
+        }
+        "vad_silence_1500" => {
+            set_vad_silence_timeout_ms(app, 1500);
         }
         "gpu_auto" => {
             select_gpu_mode(app, "auto");
@@ -599,9 +764,10 @@ fn open_config_file(app: &tauri::AppHandle) {
     log_info!("service", "Opening config file: {}", config_path.display());
 
     #[allow(deprecated)]
-    if let Err(e) = tauri_plugin_shell::ShellExt::shell(app)
-        .open(config_path.to_string_lossy().as_ref(), None::<tauri_plugin_shell::open::Program>)
-    {
+    if let Err(e) = tauri_plugin_shell::ShellExt::shell(app).open(
+        config_path.to_string_lossy().as_ref(),
+        None::<tauri_plugin_shell::open::Program>,
+    ) {
         log_error!("service", "Failed to open config file: {:?}", e);
     }
 }
@@ -688,14 +854,14 @@ fn show_about(_app: &tauri::AppHandle) {
 /// Check if Node.js is installed and return the path to node binary
 #[cfg(target_os = "macos")]
 fn find_node_path() -> Option<String> {
-    use std::process::Command;
     use std::path::Path;
+    use std::process::Command;
 
     // Common Node.js installation paths on macOS
     let common_paths = [
-        "/opt/homebrew/bin/node",       // Homebrew on Apple Silicon
-        "/usr/local/bin/node",          // Homebrew on Intel Macs
-        "/usr/bin/node",                // System installation
+        "/opt/homebrew/bin/node", // Homebrew on Apple Silicon
+        "/usr/local/bin/node",    // Homebrew on Intel Macs
+        "/usr/bin/node",          // System installation
     ];
 
     // Check common paths first
@@ -715,10 +881,8 @@ fn find_node_path() -> Option<String> {
         if nvm_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
                 // Get the most recent version (sorted descending)
-                let mut versions: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .collect();
+                let mut versions: Vec<_> =
+                    entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
                 versions.sort();
                 versions.reverse();
 
@@ -754,8 +918,8 @@ fn check_node_installed() -> bool {
 /// Check if CLI is installed and prompt to install on first launch (macOS only)
 #[cfg(target_os = "macos")]
 fn check_and_install_cli(app: &tauri::AppHandle) {
-    use std::process::Command;
     use std::path::Path;
+    use std::process::Command;
 
     // Check if Node.js is installed and get the path
     let node_path = match find_node_path() {
@@ -790,14 +954,17 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
     let wrapper_path = dybur_dir.join("bin").join("dybur");
 
     // Find the bundled cli.js resource
-    let cli_js_source = app.path().resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
+    let cli_js_source = app
+        .path()
+        .resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
 
     let cli_js_source = match cli_js_source {
         Ok(p) if p.exists() => p,
         Ok(p) => {
             // Try Resources folder in app bundle
             let exe_path = std::env::current_exe().ok();
-            let resources_path = exe_path.as_ref()
+            let resources_path = exe_path
+                .as_ref()
                 .and_then(|p| p.parent())
                 .and_then(|p| p.parent())
                 .map(|p| p.join("Resources").join("resources").join("cli.js"));
@@ -806,7 +973,12 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
                 if res.exists() {
                     res
                 } else {
-                    log_warn!("service", "CLI resource not found at {} or {:?}", p.display(), res);
+                    log_warn!(
+                        "service",
+                        "CLI resource not found at {} or {:?}",
+                        p.display(),
+                        res
+                    );
                     return;
                 }
             } else {
@@ -855,7 +1027,11 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
         .args(["+x", &wrapper_path.to_string_lossy()])
         .output();
 
-    log_info!("service", "CLI wrapper created at {}", wrapper_path.display());
+    log_info!(
+        "service",
+        "CLI wrapper created at {}",
+        wrapper_path.display()
+    );
 
     // Use osascript to symlink with administrator privileges
     let script = format!(
@@ -863,14 +1039,15 @@ fn check_and_install_cli(app: &tauri::AppHandle) {
         wrapper_path.display()
     );
 
-    let result = Command::new("osascript")
-        .args(["-e", &script])
-        .output();
+    let result = Command::new("osascript").args(["-e", &script]).output();
 
     match result {
         Ok(output) => {
             if output.status.success() {
-                log_info!("service", "CLI installed successfully to /usr/local/bin/dybur");
+                log_info!(
+                    "service",
+                    "CLI installed successfully to /usr/local/bin/dybur"
+                );
                 show_macos_notification(
                     "CLI Installed",
                     "You can now use 'dybur' command in any terminal.",
@@ -928,19 +1105,26 @@ fn check_and_install_cli_windows(app: &tauri::AppHandle) {
 
     // Check if already installed
     if cli_cmd_path.exists() && cli_js_path.exists() {
-        log_info!("service", "CLI already installed at {}", cli_cmd_path.display());
+        log_info!(
+            "service",
+            "CLI already installed at {}",
+            cli_cmd_path.display()
+        );
         return;
     }
 
     // Find the bundled cli.js resource
-    let cli_js_source = app.path().resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
+    let cli_js_source = app
+        .path()
+        .resolve("resources/cli.js", tauri::path::BaseDirectory::Resource);
 
     let cli_js_source = match cli_js_source {
         Ok(p) if p.exists() => p,
         Ok(p) => {
             // Try alternative paths for development
             let exe_path = std::env::current_exe().ok();
-            let dev_path = exe_path.as_ref()
+            let dev_path = exe_path
+                .as_ref()
                 .and_then(|p| p.parent())
                 .and_then(|p| p.parent())
                 .and_then(|p| p.parent())
@@ -950,7 +1134,12 @@ fn check_and_install_cli_windows(app: &tauri::AppHandle) {
                 if dev.exists() {
                     dev
                 } else {
-                    log_warn!("service", "CLI resource not found at {} or {}", p.display(), dev.display());
+                    log_warn!(
+                        "service",
+                        "CLI resource not found at {} or {}",
+                        p.display(),
+                        dev.display()
+                    );
                     return;
                 }
             } else {
@@ -1108,7 +1297,11 @@ fn select_recording_mode(app: &tauri::AppHandle, mode: &str) {
         (prev_mode, hotkey)
     };
 
-    let mode_display = if mode == "push_to_talk" { "push-to-talk" } else { "toggle" };
+    let mode_display = if mode == "push_to_talk" {
+        "push-to-talk"
+    } else {
+        "toggle"
+    };
     log_info!("config", "Recording mode changed to: {}", mode_display);
 
     // Unregister old hotkey and register with new mode
@@ -1153,6 +1346,58 @@ fn toggle_vad(app: &tauri::AppHandle) {
     rebuild_tray_menu(app);
 }
 
+fn set_vad_threshold(app: &tauri::AppHandle, threshold: f32) {
+    update_vad_config(
+        app,
+        format!("VAD threshold set to {:.2}", threshold),
+        |config| {
+            config.vad_threshold = threshold;
+        },
+    );
+}
+
+fn set_vad_min_speech_ms(app: &tauri::AppHandle, duration_ms: u32) {
+    update_vad_config(
+        app,
+        format!("VAD minimum speech set to {}ms", duration_ms),
+        |config| {
+            config.vad_min_speech_ms = duration_ms;
+        },
+    );
+}
+
+fn set_vad_silence_timeout_ms(app: &tauri::AppHandle, duration_ms: u32) {
+    update_vad_config(
+        app,
+        format!("VAD silence timeout set to {}ms", duration_ms),
+        |config| {
+            config.silence_timeout_ms = duration_ms;
+        },
+    );
+}
+
+fn update_vad_config<F>(app: &tauri::AppHandle, log_message: String, update: F)
+where
+    F: FnOnce(&mut config::DyburConfig),
+{
+    let state = app.state::<Mutex<AppState>>();
+    {
+        let mut state_guard = state.inner().lock().unwrap();
+        let previous_config = state_guard.config.clone();
+
+        update(&mut state_guard.config);
+
+        if let Err(e) = save_config(&state_guard.config) {
+            log_error!("config", "Failed to save config: {}", e);
+            state_guard.config = previous_config;
+            return;
+        }
+    }
+
+    log_info!("vad", "{}", log_message);
+    rebuild_tray_menu(app);
+}
+
 /// Select GPU acceleration mode
 fn select_gpu_mode(app: &tauri::AppHandle, mode: &str) {
     let state = app.state::<Mutex<AppState>>();
@@ -1177,26 +1422,40 @@ fn select_gpu_mode(app: &tauri::AppHandle, mode: &str) {
         }
     }
 
-    let mode_display = if mode == "cpu" { "CPU only" } else { "Auto (GPU if available)" };
+    let mode_display = if mode == "cpu" {
+        "CPU only"
+    } else {
+        "Auto (GPU if available)"
+    };
     log_info!("config", "GPU mode changed to: {}", mode_display);
 
     // Show notification that restart is needed
     #[cfg(target_os = "windows")]
-    show_windows_notification("GPU Mode Changed", &format!("GPU mode set to: {}. Restart app to apply.", mode_display));
+    show_windows_notification(
+        "GPU Mode Changed",
+        &format!("GPU mode set to: {}. Restart app to apply.", mode_display),
+    );
     #[cfg(target_os = "macos")]
-    show_macos_notification("GPU Mode Changed", &format!("GPU mode set to: {}. Restart app to apply.", mode_display));
+    show_macos_notification(
+        "GPU Mode Changed",
+        &format!("GPU mode set to: {}. Restart app to apply.", mode_display),
+    );
 
     // Rebuild the menu to reflect the new state
     rebuild_tray_menu(app);
 }
 
 /// Unregister and re-register the hotkey with a new recording mode
-fn reregister_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
+fn reregister_hotkey(
+    app: &tauri::AppHandle,
+    hotkey: &str,
+    recording_mode: &str,
+) -> Result<(), String> {
     use tauri_plugin_global_shortcut::Shortcut;
 
-    let shortcut: Shortcut = hotkey.parse().map_err(|e| {
-        format!("Invalid hotkey format '{}': {}", hotkey, e)
-    })?;
+    let shortcut: Shortcut = hotkey
+        .parse()
+        .map_err(|e| format!("Invalid hotkey format '{}': {}", hotkey, e))?;
 
     // Unregister the existing shortcut
     app.global_shortcut()
@@ -1220,11 +1479,22 @@ fn clean_unused_models(app: &tauri::AppHandle) {
         #[cfg(target_os = "macos")]
         show_macos_notification("Clean Models", "No unused models found.");
     } else {
-        log_info!("models", "Removed {} unused model(s): {:?}", removed.len(), removed);
+        log_info!(
+            "models",
+            "Removed {} unused model(s): {:?}",
+            removed.len(),
+            removed
+        );
         #[cfg(target_os = "windows")]
-        show_windows_notification("Clean Models", &format!("Removed {} unused model(s).", removed.len()));
+        show_windows_notification(
+            "Clean Models",
+            &format!("Removed {} unused model(s).", removed.len()),
+        );
         #[cfg(target_os = "macos")]
-        show_macos_notification("Clean Models", &format!("Removed {} unused model(s).", removed.len()));
+        show_macos_notification(
+            "Clean Models",
+            &format!("Removed {} unused model(s).", removed.len()),
+        );
 
         // Rebuild menu to reflect changes
         rebuild_tray_menu(app);
@@ -1248,7 +1518,11 @@ fn handle_model_selection(app: &tauri::AppHandle, model_id: &str) {
         switch_to_model(app, model_id);
     } else {
         // Model needs to be downloaded first
-        log_info!("models", "Model '{}' not installed, starting download...", model_id);
+        log_info!(
+            "models",
+            "Model '{}' not installed, starting download...",
+            model_id
+        );
         spawn_model_download_by_id(app, model_id, model_def.display_name);
     }
 }
@@ -1299,7 +1573,11 @@ fn switch_to_model(app: &tauri::AppHandle, model_id: &str) {
             }
         }
     } else {
-        log_error!("model", "Model '{}' not supported or files missing", model_id);
+        log_error!(
+            "model",
+            "Model '{}' not supported or files missing",
+            model_id
+        );
         #[cfg(target_os = "windows")]
         show_windows_notification("Model Error", "Model not supported or files missing");
         #[cfg(target_os = "macos")]
@@ -1319,9 +1597,21 @@ fn spawn_model_download_by_id(app: &tauri::AppHandle, model_id: &str, display_na
 
     log_info!("models", "Starting download of model: {}", model_id);
     #[cfg(target_os = "windows")]
-    show_windows_notification("Model Download", &format!("Downloading {}... This may take a few minutes.", display_name));
+    show_windows_notification(
+        "Model Download",
+        &format!(
+            "Downloading {}... This may take a few minutes.",
+            display_name
+        ),
+    );
     #[cfg(target_os = "macos")]
-    show_macos_notification("Model Download", &format!("Downloading {}... This may take a few minutes.", display_name));
+    show_macos_notification(
+        "Model Download",
+        &format!(
+            "Downloading {}... This may take a few minutes.",
+            display_name
+        ),
+    );
 
     // Rebuild menu immediately to show "Downloading..." status
     rebuild_tray_menu(app);
@@ -1346,9 +1636,15 @@ fn spawn_model_download_by_id(app: &tauri::AppHandle, model_id: &str, display_na
             Ok(path) => {
                 log_info!("models", "Model downloaded to: {}", path.display());
                 #[cfg(target_os = "windows")]
-                show_windows_notification("Model Download", &format!("{} downloaded successfully!", display_name_owned));
+                show_windows_notification(
+                    "Model Download",
+                    &format!("{} downloaded successfully!", display_name_owned),
+                );
                 #[cfg(target_os = "macos")]
-                show_macos_notification("Model Download", &format!("{} downloaded successfully!", display_name_owned));
+                show_macos_notification(
+                    "Model Download",
+                    &format!("{} downloaded successfully!", display_name_owned),
+                );
 
                 // Rebuild menu to show the new model
                 rebuild_tray_menu(&app_handle);
@@ -1403,18 +1699,26 @@ fn start_recording(app: &tauri::AppHandle) {
     {
         let engine = STT_ENGINE.lock().unwrap();
         if !engine.is_ready() {
-            log_error!("model", "STT model not loaded. Run 'dybur models prefetch' first.");
-            state_guard.set_error("STT model not loaded. Run 'dybur models prefetch' first.".to_string());
+            let model_name = state_guard.config.model.clone();
+            log_error!(
+                "model",
+                "STT model '{}' not loaded. Run 'dybur models download {}' first.",
+                model_name,
+                model_name
+            );
+            state_guard.set_error(format!(
+                "STT model '{}' not loaded. Run 'dybur models download {}' first.",
+                model_name, model_name
+            ));
             update_tray_status(app, "Model not loaded");
 
             // Show native alert to user - must be done in a separate thread to not block
-            let app_handle = app.clone();
             std::thread::spawn(move || {
                 let title = "Speech Model Required";
                 let message = "The speech recognition model is not installed.\n\n\
                     Dictation requires the model to be downloaded first.\n\n\
                     Right-click the dybur tray icon and select:\n\
-                    Models > Download Model";
+                    Models > your selected model";
 
                 #[cfg(target_os = "windows")]
                 show_windows_alert(title, message);
@@ -1446,7 +1750,11 @@ fn start_recording(app: &tauri::AppHandle) {
                 *global_buffer = Some(buffer_arc);
                 let mut global_sample_rate = RECORDING_SAMPLE_RATE.lock().unwrap();
                 *global_sample_rate = sample_rate;
-                log_info!("audio", "Recording buffer stored globally (sample_rate: {}Hz)", sample_rate);
+                log_info!(
+                    "audio",
+                    "Recording buffer stored globally (sample_rate: {}Hz)",
+                    sample_rate
+                );
             }
 
             // Store AudioCapture in thread-local to keep stream alive
@@ -1477,6 +1785,66 @@ fn start_recording(app: &tauri::AppHandle) {
     }
 }
 
+fn post_process_text(text: &str, sentence_case: bool, auto_punctuation: bool) -> String {
+    let mut processed = normalize_transcription_whitespace(text.trim());
+
+    if processed.is_empty() {
+        return processed;
+    }
+
+    if sentence_case {
+        processed = apply_sentence_case(&processed);
+    }
+
+    if auto_punctuation {
+        processed = add_basic_punctuation(&processed);
+    }
+
+    processed
+}
+
+fn normalize_transcription_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn apply_sentence_case(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut capitalize_next = true;
+
+    for ch in text.chars() {
+        if capitalize_next && ch.is_alphabetic() {
+            for upper in ch.to_uppercase() {
+                result.push(upper);
+            }
+            capitalize_next = false;
+            continue;
+        }
+
+        result.push(ch);
+
+        if matches!(ch, '.' | '!' | '?') {
+            capitalize_next = true;
+        } else if !ch.is_whitespace() {
+            capitalize_next = false;
+        }
+    }
+
+    result
+}
+
+fn add_basic_punctuation(text: &str) -> String {
+    let trimmed = text.trim_end();
+    let Some(last_char) = trimmed.chars().next_back() else {
+        return String::new();
+    };
+
+    if matches!(last_char, '.' | '!' | '?' | ',' | ';' | ':') {
+        trimmed.to_string()
+    } else {
+        format!("{}.", trimmed)
+    }
+}
+
 /// Stop recording and process audio
 fn stop_recording(app: &tauri::AppHandle) {
     // Stop streaming inference first (if running)
@@ -1494,10 +1862,13 @@ fn stop_recording(app: &tauri::AppHandle) {
     // Emit final streaming result if available
     if let Some(ref text) = streaming_text {
         log_info!("streaming", "Final streaming text: {} chars", text.len());
-        let _ = app.emit("streaming-transcription", serde_json::json!({
-            "text": text,
-            "is_final": true
-        }));
+        let _ = app.emit(
+            "streaming-transcription",
+            serde_json::json!({
+                "text": text,
+                "is_final": true
+            }),
+        );
     }
 
     // Retrieve audio data from global buffer (works across threads)
@@ -1508,14 +1879,29 @@ fn stop_recording(app: &tauri::AppHandle) {
             let mut buffer = buffer_arc.lock().unwrap();
             let data = std::mem::take(&mut *buffer);
             let duration = data.len() as f32 / sample_rate as f32;
-            log_info!("audio", "Retrieved {:.2}s of audio from global buffer ({}Hz)", duration, sample_rate);
+            log_info!(
+                "audio",
+                "Retrieved {:.2}s of audio from global buffer ({}Hz)",
+                duration,
+                sample_rate
+            );
 
             // Resample to 16kHz if needed (VAD and STT expect 16kHz)
             const TARGET_SAMPLE_RATE: u32 = 16000;
             if sample_rate != TARGET_SAMPLE_RATE {
-                log_info!("audio", "Resampling audio from {}Hz to {}Hz", sample_rate, TARGET_SAMPLE_RATE);
+                log_info!(
+                    "audio",
+                    "Resampling audio from {}Hz to {}Hz",
+                    sample_rate,
+                    TARGET_SAMPLE_RATE
+                );
                 let resampled = audio::resample_linear(&data, sample_rate, TARGET_SAMPLE_RATE);
-                log_info!("audio", "Resampled {} -> {} samples", data.len(), resampled.len());
+                log_info!(
+                    "audio",
+                    "Resampled {} -> {} samples",
+                    data.len(),
+                    resampled.len()
+                );
                 Some(resampled)
             } else {
                 Some(data)
@@ -1542,55 +1928,74 @@ fn stop_recording(app: &tauri::AppHandle) {
     let vad_enabled = state_guard.config.vad_enabled;
     let vad_threshold = state_guard.config.vad_threshold;
     let vad_min_speech_ms = state_guard.config.vad_min_speech_ms;
+    let vad_min_silence_ms = state_guard.config.silence_timeout_ms;
+    let auto_punctuation = state_guard.config.auto_punctuation;
+    let sentence_case = state_guard.config.sentence_case;
 
     // Release the state lock before processing
     drop(state_guard);
 
     // Process audio with STT if we have audio data
     if let Some(audio) = audio_data {
-        if audio.len() < 1600 {
+        let mut source_audio = audio;
+
+        if source_audio.len() < 1600 {
             // Less than 100ms of audio - too short
-            log_warn!("audio", "Recording too short ({} samples), skipping transcription", audio.len());
+            log_warn!(
+                "audio",
+                "Recording too short ({} samples), skipping transcription",
+                source_audio.len()
+            );
             update_tray_status(app, "Too short");
+            privacy::secure_clear_audio_buffer(&mut source_audio);
             return;
         }
 
         // Apply VAD filtering if enabled
-        let filtered_audio = if vad_enabled {
+        let mut filtered_audio = if vad_enabled {
             let mut vad_engine = VAD_ENGINE.lock().unwrap();
             if vad_engine.is_ready() {
                 // Configure VAD with current settings
                 vad_engine.set_config(vad::VadConfig {
                     threshold: vad_threshold,
                     min_speech_duration_ms: vad_min_speech_ms,
+                    min_silence_duration_ms: vad_min_silence_ms,
                     ..Default::default()
                 });
 
-                match vad_engine.filter_speech(&audio) {
-                    Ok(filtered) => {
+                match vad_engine.filter_speech(&source_audio) {
+                    Ok(mut filtered) => {
                         if filtered.is_empty() {
                             log_info!("vad", "No speech detected by VAD");
                             update_tray_status(app, "No speech detected");
+                            privacy::secure_clear_audio_buffer(&mut source_audio);
                             return;
                         }
                         if filtered.len() < 1600 {
-                            log_info!("vad", "Speech too short after VAD filtering ({} samples)", filtered.len());
+                            log_info!(
+                                "vad",
+                                "Speech too short after VAD filtering ({} samples)",
+                                filtered.len()
+                            );
                             update_tray_status(app, "Too short");
+                            privacy::secure_clear_audio_buffer(&mut filtered);
+                            privacy::secure_clear_audio_buffer(&mut source_audio);
                             return;
                         }
                         filtered
                     }
                     Err(e) => {
                         log_warn!("vad", "VAD filtering failed: {}, using original audio", e);
-                        audio
+                        source_audio.clone()
                     }
                 }
             } else {
-                audio
+                source_audio.clone()
             }
         } else {
-            audio
+            source_audio.clone()
         };
+        privacy::secure_clear_audio_buffer(&mut source_audio);
 
         update_tray_status(app, "Transcribing...");
 
@@ -1610,19 +2015,27 @@ fn stop_recording(app: &tauri::AppHandle) {
                 }
             }
         };
+        privacy::secure_clear_audio_buffer(&mut filtered_audio);
 
         // Inject transcribed text
         if let Some(result) = transcription_result {
-            if result.text.is_empty() {
+            let processed_text = post_process_text(&result.text, sentence_case, auto_punctuation);
+
+            if processed_text.is_empty() {
                 log_info!("model", "Transcription returned empty text");
                 update_tray_status(app, "No speech detected");
             } else {
+                let realtime = if result.inference_time_ms == 0 {
+                    0.0
+                } else {
+                    result.audio_duration_s * 1000.0 / result.inference_time_ms as f32
+                };
                 log_info!(
                     "model",
                     "Transcribed {} chars in {}ms ({}x realtime)",
-                    result.text.len(),
+                    processed_text.len(),
                     result.inference_time_ms,
-                    format!("{:.1}", result.audio_duration_s * 1000.0 / result.inference_time_ms as f32)
+                    format!("{:.1}", realtime)
                 );
 
                 // Check if FTUE window exists - if so, emit directly instead of clipboard paste
@@ -1631,12 +2044,12 @@ fn stop_recording(app: &tauri::AppHandle) {
 
                 if ftue_exists {
                     // Emit transcription directly to FTUE window
-                    let _ = app.emit_to("ftue", "ftue:transcription", &result.text);
+                    let _ = app.emit_to("ftue", "ftue:transcription", &processed_text);
                     log_info!("injection", "Text emitted to FTUE window");
                     update_tray_status(app, "Done");
                 } else {
                     // Inject the text into the active application
-                    match inject_text(&result.text, restore_clipboard) {
+                    match inject_text(&processed_text, restore_clipboard) {
                         Ok(()) => {
                             log_info!("injection", "Text injected successfully");
                             update_tray_status(app, "Done");
@@ -1649,7 +2062,10 @@ fn stop_recording(app: &tauri::AppHandle) {
                             #[cfg(target_os = "macos")]
                             {
                                 let error_str = e.to_string();
-                                if error_str.contains("Accessibility") || error_str.contains("permission") || error_str.contains("not allowed") {
+                                if error_str.contains("Accessibility")
+                                    || error_str.contains("permission")
+                                    || error_str.contains("not allowed")
+                                {
                                     show_macos_alert(
                                         "Accessibility Permission Required",
                                         "dybur needs Accessibility permission to paste text automatically.\n\n\
@@ -1677,7 +2093,7 @@ fn stop_recording(app: &tauri::AppHandle) {
                                 // On Windows, show a notification
                                 show_windows_notification(
                                     "Injection Failed",
-                                    &format!("Failed to paste text: {}. Text is on clipboard.", e)
+                                    &format!("Failed to paste text: {}. Text is on clipboard.", e),
                                 );
                             }
                         }
@@ -1792,10 +2208,13 @@ fn start_streaming_inference(app: &tauri::AppHandle) {
             // Emit partial transcription to frontend
             if let Some(text) = partial_text {
                 log_debug!("streaming", "Partial transcription: {}", text);
-                let _ = app_handle.emit("streaming-transcription", serde_json::json!({
-                    "text": text,
-                    "is_final": false
-                }));
+                let _ = app_handle.emit(
+                    "streaming-transcription",
+                    serde_json::json!({
+                        "text": text,
+                        "is_final": false
+                    }),
+                );
             }
         }
 
@@ -1815,7 +2234,7 @@ fn stop_streaming_inference() -> Option<String> {
 
     // Get final text from streaming state
     let final_text = {
-        let mut streaming_state = STREAMING_STATE.lock().unwrap();
+        let streaming_state = STREAMING_STATE.lock().unwrap();
         if let Some(ref state) = *streaming_state {
             let text = state.get_partial_text();
             if !text.is_empty() {
@@ -1848,22 +2267,19 @@ fn create_overlay_window(app: &tauri::AppHandle) {
         return;
     }
 
-    let mut builder = WebviewWindowBuilder::new(
-        app,
-        OVERLAY_LABEL,
-        WebviewUrl::App("index.html".into()),
-    )
-    .title("dybur Overlay")
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .resizable(false)
-    .visible(false)
-    .focusable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible_on_all_workspaces(true)
-    .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    let mut builder =
+        WebviewWindowBuilder::new(app, OVERLAY_LABEL, WebviewUrl::App("index.html".into()))
+            .title("dybur Overlay")
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .resizable(false)
+            .visible(false)
+            .focusable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible_on_all_workspaces(true)
+            .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
 
     if let Some((x, y)) = overlay_position(app) {
         builder = builder.position(x, y);
@@ -1874,20 +2290,20 @@ fn create_overlay_window(app: &tauri::AppHandle) {
             if let Err(e) = window.set_ignore_cursor_events(true) {
                 log_warn!("service", "Failed to set overlay click-through: {}", e);
             }
-            
+
             // Remove window border/shadow on Windows
             #[cfg(target_os = "windows")]
             {
+                use windows::Win32::Foundation::HWND;
                 use windows::Win32::Graphics::Dwm::{
-                    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
-                    DWM_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+                    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+                    DWM_WINDOW_CORNER_PREFERENCE,
                 };
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE,
-                    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE,
+                    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
                 };
-                use windows::Win32::Foundation::HWND;
-                
+
                 if let Ok(hwnd) = window.hwnd() {
                     let hwnd = HWND(hwnd.0);
                     unsafe {
@@ -1899,13 +2315,13 @@ fn create_overlay_window(app: &tauri::AppHandle) {
                             &corner_pref as *const DWM_WINDOW_CORNER_PREFERENCE as *const _,
                             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
                         );
-                        
+
                         // Set extended window styles for a borderless overlay
                         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                        let new_style = ex_style 
-                            | WS_EX_LAYERED.0 
-                            | WS_EX_TRANSPARENT.0 
-                            | WS_EX_TOOLWINDOW.0 
+                        let new_style = ex_style
+                            | WS_EX_LAYERED.0
+                            | WS_EX_TRANSPARENT.0
+                            | WS_EX_TOOLWINDOW.0
                             | WS_EX_NOACTIVATE.0;
                         SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
                     }
@@ -1961,16 +2377,22 @@ fn set_overlay_state(app: &tauri::AppHandle, state: RecordingState) {
 fn open_logs(app: &tauri::AppHandle) {
     let logs_dir = config::get_logs_dir();
     log_info!("service", "Opening logs directory: {}", logs_dir);
-    
+
     // Use shell open with no specific program (let OS choose)
     #[allow(deprecated)]
-    if let Err(e) = tauri_plugin_shell::ShellExt::shell(app).open(&logs_dir, None::<tauri_plugin_shell::open::Program>) {
+    if let Err(e) = tauri_plugin_shell::ShellExt::shell(app)
+        .open(&logs_dir, None::<tauri_plugin_shell::open::Program>)
+    {
         log_error!("service", "Failed to open logs directory: {:?}", e);
     }
 }
 
 /// Register global hotkey
-fn register_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -> Result<(), String> {
+fn register_hotkey(
+    app: &tauri::AppHandle,
+    hotkey: &str,
+    recording_mode: &str,
+) -> Result<(), String> {
     use tauri_plugin_global_shortcut::Shortcut;
 
     let shortcut: Shortcut = hotkey.parse().map_err(|e| {
@@ -1983,9 +2405,17 @@ fn register_hotkey(app: &tauri::AppHandle, hotkey: &str, recording_mode: &str) -
     let is_push_to_talk = recording_mode == "push_to_talk";
 
     if is_push_to_talk {
-        log_info!("hotkey", "Using push-to-talk mode: hold {} to record", hotkey);
+        log_info!(
+            "hotkey",
+            "Using push-to-talk mode: hold {} to record",
+            hotkey
+        );
     } else {
-        log_info!("hotkey", "Using toggle mode: press {} to start/stop", hotkey);
+        log_info!(
+            "hotkey",
+            "Using toggle mode: press {} to start/stop",
+            hotkey
+        );
     }
 
     app.global_shortcut()
@@ -2084,11 +2514,17 @@ fn show_windows_notification(title: &str, message: &str) {
 fn show_windows_alert(title: &str, message: &str) {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONWARNING};
     use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
 
-    let title_wide: Vec<u16> = OsStr::new(title).encode_wide().chain(std::iter::once(0)).collect();
-    let message_wide: Vec<u16> = OsStr::new(message).encode_wide().chain(std::iter::once(0)).collect();
+    let title_wide: Vec<u16> = OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let message_wide: Vec<u16> = OsStr::new(message)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         MessageBoxW(
@@ -2123,9 +2559,7 @@ fn show_macos_alert(title: &str, message: &str) {
         message_escaped, title_escaped
     );
 
-    let _ = Command::new("osascript")
-        .args(["-e", &script])
-        .output();
+    let _ = Command::new("osascript").args(["-e", &script]).output();
 
     log_info!("service", "Alert shown: {} - {}", title, message);
 }

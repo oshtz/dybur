@@ -39,7 +39,7 @@ const colors = {
   bgCyan: '\x1b[46m',
 
   // dybur brand colors (RGB true color)
-  accent: '\x1b[38;2;94;255;192m',      // #5effc0 - mint green accent
+  accent: '\x1b[38;2;94;255;192m', // #5effc0 - mint green accent
   textPrimary: '\x1b[38;2;201;255;232m', // #c9ffe8 - light mint text
 };
 
@@ -98,7 +98,7 @@ function blue(text: string): string {
 export const brand = {
   primary: (text: string) => c('textPrimary', text),
   accent: (text: string) => c('accent', text),
-  success: (text: string) => c('accent', text),  // Use brand accent for success
+  success: (text: string) => c('accent', text), // Use brand accent for success
   error: red,
   warning: yellow,
   info: (text: string) => c('textPrimary', text),
@@ -124,15 +124,15 @@ export const LOGO_INLINE = `${brand.accent('dybur')}`;
  * Status icons - using dybur brand colors and Unicode symbols
  */
 export const icons = {
-  success: c('accent', '✓'),      // U+2713 Check Mark
-  error: red('✗'),                // U+2717 Ballot X
-  warning: yellow('⚠'),           // U+26A0 Warning Sign
-  info: c('textPrimary', '✳'),    // U+2733 Eight Spoked Asterisk
-  arrow: c('accent', '→'),        // U+2192 Rightwards Arrow
-  bullet: dim('•'),               // U+2022 Bullet
-  recording: red('●'),            // U+25CF Black Circle
-  idle: dim('○'),                 // U+25CB White Circle
-  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],  // Braille pattern dots
+  success: c('accent', '✓'), // U+2713 Check Mark
+  error: red('✗'), // U+2717 Ballot X
+  warning: yellow('⚠'), // U+26A0 Warning Sign
+  info: c('textPrimary', '✳'), // U+2733 Eight Spoked Asterisk
+  arrow: c('accent', '→'), // U+2192 Rightwards Arrow
+  bullet: dim('•'), // U+2022 Bullet
+  recording: red('●'), // U+25CF Black Circle
+  idle: dim('○'), // U+25CB White Circle
+  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'], // Braille pattern dots
 };
 
 /**
@@ -546,15 +546,18 @@ export async function confirm(message: string, defaultValue = false): Promise<bo
     });
 
     const hint = defaultValue ? 'Y/n' : 'y/N';
-    rl.question(`  ${brand.accent('?')} ${bold(message)} ${dim(`(${hint})`)} `, (answer: string) => {
-      rl.close();
-      const normalized = answer.toLowerCase().trim();
-      if (normalized === '') {
-        resolve(defaultValue);
-      } else {
-        resolve(normalized === 'y' || normalized === 'yes');
+    rl.question(
+      `  ${brand.accent('?')} ${bold(message)} ${dim(`(${hint})`)} `,
+      (answer: string) => {
+        rl.close();
+        const normalized = answer.toLowerCase().trim();
+        if (normalized === '') {
+          resolve(defaultValue);
+        } else {
+          resolve(normalized === 'y' || normalized === 'yes');
+        }
       }
-    });
+    );
   });
 }
 

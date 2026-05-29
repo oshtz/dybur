@@ -15,7 +15,7 @@ pub enum RecordingState {
 }
 
 /// Main application state (Send + Sync safe)
-/// 
+///
 /// Audio capture is handled separately via thread-local storage
 /// because cpal::Stream cannot be sent between threads.
 pub struct AppState {
@@ -94,14 +94,9 @@ pub enum DownloadState {
         file_total_bytes: u64,
     },
     /// Download completed
-    Completed {
-        model_name: String,
-    },
+    Completed { model_name: String },
     /// Download failed
-    Failed {
-        model_name: String,
-        error: String,
-    },
+    Failed { model_name: String, error: String },
 }
 
 impl Default for DownloadState {
@@ -111,7 +106,7 @@ impl Default for DownloadState {
 }
 
 /// Global download state (separate from AppState for thread safety)
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::RwLock;
 
 lazy_static::lazy_static! {
@@ -125,7 +120,12 @@ impl DownloadState {
     }
 
     pub fn progress_percent(&self) -> Option<u8> {
-        if let DownloadState::Downloading { file_index, total_files, .. } = self {
+        if let DownloadState::Downloading {
+            file_index,
+            total_files,
+            ..
+        } = self
+        {
             Some(((*file_index as f32 / *total_files as f32) * 100.0) as u8)
         } else {
             None
@@ -135,8 +135,18 @@ impl DownloadState {
     pub fn status_string(&self) -> String {
         match self {
             DownloadState::Idle => "Idle".to_string(),
-            DownloadState::Downloading { current_file, file_index, total_files, .. } => {
-                format!("Downloading {} ({}/{})", current_file, file_index + 1, total_files)
+            DownloadState::Downloading {
+                current_file,
+                file_index,
+                total_files,
+                ..
+            } => {
+                format!(
+                    "Downloading {} ({}/{})",
+                    current_file,
+                    file_index + 1,
+                    total_files
+                )
             }
             DownloadState::Completed { model_name } => {
                 format!("Downloaded {}", model_name)

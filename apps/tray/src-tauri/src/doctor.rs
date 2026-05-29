@@ -4,7 +4,7 @@
 
 use crate::audio::{has_input_device, list_input_devices};
 use crate::config::{get_config_path, get_data_dir, get_models_dir, load_config};
-use crate::models::{is_default_model_installed, get_model_metadata, DEFAULT_MODEL};
+use crate::models::{get_model_metadata, is_model_installed, normalize_model_name, DEFAULT_MODEL};
 
 /// Diagnostic check status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,23 +80,31 @@ fn check_config() -> DiagnosticResult {
 
 /// Check model installation
 fn check_model() -> DiagnosticResult {
-    if !is_default_model_installed() {
+    let active_model = load_config()
+        .map(|config| normalize_model_name(&config.model).to_string())
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+    if !is_model_installed(&active_model) {
         return DiagnosticResult {
             name: "Speech Model".to_string(),
             status: DiagnosticStatus::Fail,
-            message: "Model not installed".to_string(),
+            message: format!("Model not installed: {}", active_model),
             details: Some("Download model from Models menu".to_string()),
         };
     }
 
-    match get_model_metadata(DEFAULT_MODEL) {
+    match get_model_metadata(&active_model) {
         Some(metadata) => {
             let variant = metadata.variant.as_deref().unwrap_or("full");
-            let date = metadata.downloaded_at.split('T').next().unwrap_or("unknown");
+            let date = metadata
+                .downloaded_at
+                .split('T')
+                .next()
+                .unwrap_or("unknown");
             DiagnosticResult {
                 name: "Speech Model".to_string(),
                 status: DiagnosticStatus::Pass,
-                message: DEFAULT_MODEL.to_string(),
+                message: active_model,
                 details: Some(format!("{} variant, downloaded {}", variant, date)),
             }
         }
