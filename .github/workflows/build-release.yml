@@ -436,6 +436,13 @@ jobs:
           }
           "PORTABLE_EXE_PATH=$outputExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          if ("${{ steps.windows-secrets.outputs.available }}" -ne "true") {
+            & ".\scripts\verify-windows-release.ps1" -InputFile $outputExe -MinSizeMB 15
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows release verifier failed"
+            }
+          }
+
       - name: Sign portable exe
         if: steps.windows-secrets.outputs.available == 'true'
         shell: pwsh
@@ -479,6 +486,7 @@ jobs:
           Write-Host "Portable EXE signed by: $($signature.SignerCertificate.Subject)"
 
       - name: Verify portable exe
+        if: steps.windows-secrets.outputs.available == 'true'
         shell: pwsh
         env:
           PORTABLE_EXE_PATH: apps/tray/src-tauri/target/release/dybur-windows-x64.exe
