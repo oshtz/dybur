@@ -170,7 +170,15 @@ The verifier checks that the latest GitHub release tag matches `package.json`, t
 
 `pnpm release:verify:macos` downloads the public DMG, records SHA-256 and file size, and reports that deeper mount/codesign/Gatekeeper checks require macOS. On a Mac, run `node scripts/verify-macos-release.js --require-macos-checks` to make those checks mandatory. For CI fixtures or locally downloaded artifacts, run `node scripts/verify-macos-release.js --input-file path/to/dybur-macos-arm64.dmg --skip-macos-checks --expected-sha256 <hash>`.
 
-On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate.
+On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate. For locally built artifacts, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1 -InputFile path/to/dybur-windows-x64.exe -RequireSignature`.
+
+The Windows release workflow signs the final portable EXE when these GitHub secrets are present:
+
+- `WINDOWS_CERTIFICATE`: base64-encoded PFX code-signing certificate.
+- `WINDOWS_CERTIFICATE_PASSWORD`: PFX password.
+- `WINDOWS_TIMESTAMP_URL`: optional timestamp server; defaults to `http://timestamp.digicert.com`.
+
+When the certificate secrets are configured, CI runs the Windows verifier with `-RequireSignature` before upload. Without those secrets, the release remains unsigned and the verifier reports Authenticode status as a warning.
 
 ## Requirements
 

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags:
-      - "v*"
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,24 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Check Windows signing secrets
+        id: windows-secrets
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $missing = @()
+          if (-not $env:WINDOWS_CERTIFICATE) { $missing += "WINDOWS_CERTIFICATE" }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { $missing += "WINDOWS_CERTIFICATE_PASSWORD" }
+
+          if ($missing.Count -eq 0) {
+            "available=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "available=false" >> $env:GITHUB_OUTPUT
+            Write-Host "Windows signing secrets not configured; portable EXE will be unsigned. Missing: $($missing -join ', ')"
+          }
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -29,8 +47,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "pnpm"
+          node-version: '20'
+          cache: 'pnpm'
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
@@ -418,6 +436,64 @@ jobs:
           }
           "PORTABLE_EXE_PATH=$outputExe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Sign portable exe
+        if: steps.windows-secrets.outputs.available == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not (Test-Path -LiteralPath $env:PORTABLE_EXE_PATH)) {
+            throw "Portable EXE not found at $env:PORTABLE_EXE_PATH"
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "dybur-windows-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+            Sort-Object -Property FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $signtool) {
+            Remove-Item -LiteralPath $certPath -Force -ErrorAction SilentlyContinue
+            throw "signtool.exe not found in Windows SDK"
+          }
+
+          $timestampUrl = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          & $signtool.FullName sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestampUrl /td SHA256 $env:PORTABLE_EXE_PATH
+          $exitCode = $LASTEXITCODE
+          Remove-Item -LiteralPath $certPath -Force -ErrorAction SilentlyContinue
+
+          if ($exitCode -ne 0) {
+            throw "signtool failed with exit code $exitCode"
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $env:PORTABLE_EXE_PATH
+          if ($signature.Status -ne "Valid") {
+            throw "Portable EXE signature status is $($signature.Status)"
+          }
+
+          Write-Host "Portable EXE signed by: $($signature.SignerCertificate.Subject)"
+
+      - name: Verify portable exe
+        shell: pwsh
+        run: |
+          $verifierArgs = @(
+            "-InputFile", $env:PORTABLE_EXE_PATH,
+            "-MinSizeMB", "15"
+          )
+
+          if ("${{ steps.windows-secrets.outputs.available }}" -eq "true") {
+            $verifierArgs += "-RequireSignature"
+          }
+
+          & ".\scripts\verify-windows-release.ps1" @verifierArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release verifier failed"
+          }
+
       - name: Upload portable exe
         uses: actions/upload-artifact@v4
         with:
@@ -522,8 +598,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "pnpm"
+          node-version: '20'
+          cache: 'pnpm'
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust

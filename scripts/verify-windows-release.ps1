@@ -1,6 +1,7 @@
 param(
   [string]$Repo = "oshtz/dybur",
   [string]$AssetName = "dybur-windows-x64.exe",
+  [string]$InputFile = "",
   [int]$MinSizeMB = 15,
   [string]$OutputDir = "",
   [string]$ExpectedSha256 = "",
@@ -24,11 +25,13 @@ if (-not $OutputDir) {
 New-DirectoryIfMissing -Path $OutputDir
 
 $downloadUrl = "https://github.com/$Repo/releases/latest/download/$AssetName"
-$downloadPath = Join-Path $OutputDir $AssetName
+$downloadPath = if ($InputFile) { (Resolve-Path -LiteralPath $InputFile).Path } else { Join-Path $OutputDir $AssetName }
 
-Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
-Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -MaximumRedirection 5 -Headers @{
-  "User-Agent" = "dybur-windows-release-verifier"
+if (-not $InputFile) {
+  Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+  Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -MaximumRedirection 5 -Headers @{
+    "User-Agent" = "dybur-windows-release-verifier"
+  }
 }
 
 $file = Get-Item -LiteralPath $downloadPath
@@ -55,11 +58,15 @@ if ($signature.Status -ne "Valid") {
   }
 }
 
+$source = if ($InputFile) { "input-file" } else { "download" }
+$summaryDownloadUrl = if ($InputFile) { $null } else { $downloadUrl }
+
 $summary = [pscustomobject]@{
   ok = $issues.Count -eq 0
+  source = $source
   repo = $Repo
   assetName = $AssetName
-  downloadUrl = $downloadUrl
+  downloadUrl = $summaryDownloadUrl
   downloadPath = $downloadPath
   sizeBytes = $file.Length
   sizeMB = [math]::Round($file.Length / 1MB, 1)
@@ -74,7 +81,11 @@ if ($Json) {
   $summary | ConvertTo-Json -Depth 4
 } else {
   Write-Host "Windows release asset: $($summary.assetName)"
-  Write-Host "Downloaded: $($summary.downloadPath)"
+  if ($summary.source -eq "download") {
+    Write-Host "Downloaded: $($summary.downloadPath)"
+  } else {
+    Write-Host "Input file: $($summary.downloadPath)"
+  }
   Write-Host "Size: $($summary.sizeMB) MB"
   Write-Host "SHA-256: $($summary.sha256)"
   Write-Host "Authenticode: $($summary.signatureStatus)"

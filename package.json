@@ -7,7 +7,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test && pnpm test:scripts",
-    "test:scripts": "node --test scripts/asr-candidate-runner.test.js scripts/asr-eval.test.js scripts/asr-gate.test.js scripts/asr-manifest-check.test.js scripts/cli-candidates.test.js scripts/verify-macos-release.test.js scripts/verify-release.test.js",
+    "test:scripts": "node --test scripts/asr-candidate-runner.test.js scripts/asr-eval.test.js scripts/asr-gate.test.js scripts/asr-manifest-check.test.js scripts/cli-candidates.test.js scripts/verify-macos-release.test.js scripts/verify-release.test.js scripts/verify-windows-release.test.js",
     "lint": "eslint \"packages/**/*.ts\"",
     "format": "prettier --write \"packages/**/*.ts\"",
     "typecheck": "pnpm --filter @dybur/config build && pnpm --filter @dybur/core build && pnpm -r typecheck",
