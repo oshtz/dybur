@@ -1,0 +1,8 @@
+{
+  "minSamples": 12,
+  "minSamplesPerTag": 2,
+  "requireAudio": true,
+  "requireDuration": true,
+  "requireTags": true,
+  "requiredTags": ["english", "short", "long", "quiet", "noisy", "domain"]
+}

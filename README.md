@@ -113,7 +113,8 @@ dybur supports multiple speech recognition models. You can switch models from th
 
 ```sh
 dybur models list      # List available models
-dybur models switch    # Select a model interactively
+dybur models set       # Select a model interactively
+dybur models candidates # Show experimental model candidates
 ```
 
 | Model                         | Size    | Languages | Description                                             |
@@ -144,11 +145,32 @@ Keep the copied `metadata.json` file with each model directory; dybur uses it fo
 Use the local scoring harness to compare saved model hypotheses across a repeatable sample set:
 
 ```sh
+pnpm eval:asr:manifest benchmarks/asr/example.json --require-duration --require-tags
+pnpm eval:asr:manifest benchmarks/asr/<run>.json --config benchmarks/asr/corpus-policy.example.json
 pnpm eval:asr benchmarks/asr/example.json
-pnpm eval:asr benchmarks/asr/example.json --format json
+pnpm eval:asr benchmarks/asr/example.json --format json --output benchmarks/asr/report.json --strict
+pnpm eval:asr:gate benchmarks/asr/candidate-report.json --config benchmarks/asr/gates/candidate-promotion.example.json
 ```
 
-The harness reports WER, CER, median latency, and realtime factor. See `docs/asr-evaluation.md` for the manifest shape and recommended sample set.
+The harness reports WER, CER, median latency, realtime factor, and per-tag summaries. See `docs/asr-evaluation.md` for the manifest shape, reusable corpus policy, and recommended sample set.
+
+Experimental model candidates such as CoreML Parakeet, MLX Parakeet, Qwen3-ASR, and Moonshine are tracked separately from production model IDs. Use `dybur models candidates` to inspect them, `scripts/asr-candidates/` for benchmark wrappers, and `docs/model-candidate-evaluation.md` for the benchmark workflow.
+
+### Release Verification
+
+Before publishing or checking the landing page against a new app release, verify the GitHub release contract:
+
+```sh
+pnpm release:verify
+pnpm release:verify:macos
+pnpm release:verify:windows
+```
+
+The verifier checks that the latest GitHub release tag matches `package.json`, that the stable public assets are present (`dybur-macos-arm64.dmg` and `dybur-windows-x64.exe`), that known legacy asset names are absent, and that `/latest/download/` URLs resolve.
+
+`pnpm release:verify:macos` downloads the public DMG, records SHA-256 and file size, and reports that deeper mount/codesign/Gatekeeper checks require macOS. On a Mac, run `node scripts/verify-macos-release.js --require-macos-checks` to make those checks mandatory. For CI fixtures or locally downloaded artifacts, run `node scripts/verify-macos-release.js --input-file path/to/dybur-macos-arm64.dmg --skip-macos-checks --expected-sha256 <hash>`.
+
+On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate.
 
 ## Requirements
 

@@ -37,6 +37,8 @@ logs/
 .env
 .env.local
 .env.*.local
+.venv/
+.venv-*/
 
 # Test coverage
 coverage/
@@ -60,7 +62,14 @@ models/
 # Audio test files
 *.wav
 *.mp3
+*.m4a
+*.flac
 *.ogg
+
+# Local ASR benchmark setup
+benchmarks/asr/candidate-commands.local.json
+benchmarks/asr/*.local.json
+benchmarks/asr/gates/*.local.json
 
 # Debug files
 *.pdb

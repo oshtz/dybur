@@ -80,15 +80,17 @@ function showVersion(): void {
 
 async function main() {
   const args = process.argv.slice(2);
+  const firstCommandIndex = args.findIndex((arg) => !arg.startsWith('-'));
+  const globalArgs = firstCommandIndex === -1 ? args : args.slice(0, firstCommandIndex);
 
   // Parse global options
-  const { values, positionals } = parseArgs({
-    args,
+  const { values } = parseArgs({
+    args: globalArgs,
     options: {
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
-    allowPositionals: true,
+    allowPositionals: false,
     strict: false,
   });
 
@@ -98,14 +100,14 @@ async function main() {
     return;
   }
 
-  if (values.help || positionals.length === 0) {
+  if (values.help || firstCommandIndex === -1) {
     showHelp();
     return;
   }
 
   // Route to command
-  const cmd = positionals[0];
-  const commandArgs = positionals.slice(1);
+  const cmd = args[firstCommandIndex];
+  const commandArgs = args.slice(firstCommandIndex + 1);
 
   try {
     switch (cmd) {

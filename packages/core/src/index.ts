@@ -37,6 +37,16 @@ export {
   type DownloadProgress,
 } from './models.js';
 
+// Experimental model candidates
+export {
+  MODEL_CANDIDATES,
+  getModelCandidate,
+  getModelCandidates,
+  type CandidateRecommendation,
+  type CandidateRuntime,
+  type ModelCandidate,
+} from './model-candidates.js';
+
 // Post-processing
 export {
   postProcess,

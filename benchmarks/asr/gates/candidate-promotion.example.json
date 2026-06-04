@@ -1,0 +1,8 @@
+{
+  "baseline": "parakeet-tdt-v3-int8",
+  "checkTags": true,
+  "maxWerRegression": 0.02,
+  "maxCerRegression": 0.01,
+  "maxRtfRegression": 0.1,
+  "maxLatencyRegressionMs": 250
+}

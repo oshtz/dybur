@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 function usage() {
-  console.log(`Usage: node scripts/asr-eval.js <manifest.json> [--format markdown|json] [--output file]
+  console.log(`Usage: node scripts/asr-eval.js <manifest.json> [--format markdown|json] [--output file] [--strict]
 
 Manifest shape:
 {
@@ -31,6 +31,7 @@ function parseArgs(argv) {
   const options = {
     format: 'markdown',
     output: null,
+    strict: false,
   };
 
   while (args.length > 0) {
@@ -41,6 +42,9 @@ function parseArgs(argv) {
         break;
       case '--output':
         options.output = args.shift() || '';
+        break;
+      case '--strict':
+        options.strict = true;
         break;
       case '--help':
       case '-h':
@@ -73,6 +77,60 @@ function readManifest(manifestPath) {
   }
 
   return { manifest, resolvedPath };
+}
+
+function validateManifest(manifest, options = {}) {
+  const sampleIds = new Set();
+  for (const sample of manifest.samples) {
+    if (!sample.id || typeof sample.reference !== 'string') {
+      throw new Error('Each sample must include id and reference');
+    }
+    if (sample.tags !== undefined) {
+      if (!Array.isArray(sample.tags)) {
+        throw new Error(`Sample ${sample.id} tags must be an array`);
+      }
+      for (const tag of sample.tags) {
+        if (typeof tag !== 'string' || tag.trim().length === 0) {
+          throw new Error(`Sample ${sample.id} tags must be non-empty strings`);
+        }
+      }
+    }
+    if (sampleIds.has(sample.id)) {
+      throw new Error(`Duplicate sample id: ${sample.id}`);
+    }
+    sampleIds.add(sample.id);
+  }
+
+  const runKeys = new Set();
+  const modelSamples = new Map();
+  for (const run of manifest.runs) {
+    if (!run.model || !run.sampleId || typeof run.hypothesis !== 'string') {
+      throw new Error('Each run must include model, sampleId, and hypothesis');
+    }
+    if (!sampleIds.has(run.sampleId)) {
+      throw new Error(`Run references unknown sample: ${run.sampleId}`);
+    }
+
+    const key = `${run.model}\u0000${run.sampleId}`;
+    if (runKeys.has(key)) {
+      throw new Error(`Duplicate run for model/sample: ${run.model}/${run.sampleId}`);
+    }
+    runKeys.add(key);
+
+    if (!modelSamples.has(run.model)) {
+      modelSamples.set(run.model, new Set());
+    }
+    modelSamples.get(run.model).add(run.sampleId);
+  }
+
+  if (options.strict) {
+    for (const [model, modelSampleIds] of modelSamples.entries()) {
+      const missing = [...sampleIds].filter((sampleId) => !modelSampleIds.has(sampleId));
+      if (missing.length > 0) {
+        throw new Error(`Model ${model} is missing sample(s): ${missing.join(', ')}`);
+      }
+    }
+  }
 }
 
 function normalizeText(text) {
@@ -142,15 +200,35 @@ function milliseconds(value) {
   return value == null ? '-' : `${Math.round(value)}ms`;
 }
 
+function metadataValue(value) {
+  return value == null || value === '' ? '-' : String(value);
+}
+
+function sampleTags(sample) {
+  if (!Array.isArray(sample.tags)) {
+    return [];
+  }
+  return [...new Set(sample.tags.map((tag) => tag.trim()))].sort();
+}
+
+function summarizeRuns(runs) {
+  return {
+    samples: runs.length,
+    wer: mean(runs.map((run) => run.wer)),
+    cer: mean(runs.map((run) => run.cer)),
+    medianLatencyMs: median(runs.map((run) => run.latencyMs).filter((value) => value != null)),
+    medianRealtimeFactor: median(
+      runs.map((run) => run.realtimeFactor).filter((value) => value != null)
+    ),
+  };
+}
+
 function scoreManifest(manifest) {
   const samples = new Map(manifest.samples.map((sample) => [sample.id, sample]));
   const scoredRuns = [];
 
   for (const run of manifest.runs) {
     const sample = samples.get(run.sampleId);
-    if (!sample) {
-      throw new Error(`Run references unknown sample: ${run.sampleId}`);
-    }
 
     const referenceWords = words(sample.reference);
     const hypothesisWords = words(run.hypothesis);
@@ -169,33 +247,49 @@ function scoreManifest(manifest) {
       realtimeFactor: latencyMs != null && durationMs ? latencyMs / durationMs : null,
       reference: sample.reference,
       hypothesis: run.hypothesis,
+      tags: sampleTags(sample),
     });
   }
 
   const byModel = new Map();
+  const byTagAndModel = new Map();
   for (const run of scoredRuns) {
     if (!byModel.has(run.model)) {
       byModel.set(run.model, []);
     }
     byModel.get(run.model).push(run);
+
+    for (const tag of run.tags) {
+      const key = `${tag}\u0000${run.model}`;
+      if (!byTagAndModel.has(key)) {
+        byTagAndModel.set(key, { tag, model: run.model, runs: [] });
+      }
+      byTagAndModel.get(key).runs.push(run);
+    }
   }
 
   const models = [...byModel.entries()].map(([model, runs]) => ({
     model,
-    samples: runs.length,
-    wer: mean(runs.map((run) => run.wer)),
-    cer: mean(runs.map((run) => run.cer)),
-    medianLatencyMs: median(runs.map((run) => run.latencyMs).filter((value) => value != null)),
-    medianRealtimeFactor: median(
-      runs.map((run) => run.realtimeFactor).filter((value) => value != null)
-    ),
+    ...summarizeRuns(runs),
   }));
+
+  const tagSummaries = [...byTagAndModel.values()]
+    .map(({ tag, model, runs }) => ({
+      tag,
+      model,
+      ...summarizeRuns(runs),
+    }))
+    .sort(
+      (left, right) => left.tag.localeCompare(right.tag) || left.model.localeCompare(right.model)
+    );
 
   return {
     generatedAt: new Date().toISOString(),
     sampleCount: samples.size,
     runCount: scoredRuns.length,
+    sourceMetadata: manifest.metadata ?? null,
     models,
+    tagSummaries,
     runs: scoredRuns,
   };
 }
@@ -221,13 +315,51 @@ function renderMarkdown(report, sourcePath) {
     );
   }
 
+  if (report.sourceMetadata) {
+    lines.push('', '## Source Metadata', '');
+    lines.push('| Field | Value |');
+    lines.push('| --- | --- |');
+
+    const metadataFields = [
+      ['Runner', report.sourceMetadata.runner],
+      ['Run generated', report.sourceMetadata.generatedAt],
+      ['Git head', report.sourceMetadata.gitHead],
+      ['Platform', report.sourceMetadata.platform],
+      ['Architecture', report.sourceMetadata.arch],
+      ['Node', report.sourceMetadata.nodeVersion],
+      ['Selected model', report.sourceMetadata.selectedModel],
+      ['Timeout', report.sourceMetadata.timeoutMs],
+      ['Commands', report.sourceMetadata.commandCount],
+      ['Manifest', report.sourceMetadata.manifestPath],
+      ['Command file', report.sourceMetadata.commandsPath],
+    ];
+
+    for (const [field, value] of metadataFields) {
+      lines.push(`| ${field} | ${metadataValue(value).replace(/\|/g, '\\|')} |`);
+    }
+  }
+
+  if (report.tagSummaries.length > 0) {
+    lines.push('', '## Tag Summary', '');
+    lines.push('| Tag | Model | Samples | WER | CER | Median latency | Median realtime |');
+    lines.push('| --- | --- | ---: | ---: | ---: | ---: | ---: |');
+
+    for (const tag of report.tagSummaries) {
+      lines.push(
+        `| ${tag.tag} | ${tag.model} | ${tag.samples} | ${percent(tag.wer)} | ${percent(tag.cer)} | ${milliseconds(tag.medianLatencyMs)} | ${
+          tag.medianRealtimeFactor == null ? '-' : `${tag.medianRealtimeFactor.toFixed(2)}x`
+        } |`
+      );
+    }
+  }
+
   lines.push('', '## Runs', '');
-  lines.push('| Model | Sample | WER | CER | Latency | Hypothesis |');
-  lines.push('| --- | --- | ---: | ---: | ---: | --- |');
+  lines.push('| Model | Sample | Tags | WER | CER | Latency | Hypothesis |');
+  lines.push('| --- | --- | --- | ---: | ---: | ---: | --- |');
 
   for (const run of report.runs) {
     lines.push(
-      `| ${run.model} | ${run.sampleId} | ${percent(run.wer)} | ${percent(run.cer)} | ${milliseconds(run.latencyMs)} | ${run.hypothesis.replace(/\|/g, '\\|')} |`
+      `| ${run.model} | ${run.sampleId} | ${run.tags.join(', ') || '-'} | ${percent(run.wer)} | ${percent(run.cer)} | ${milliseconds(run.latencyMs)} | ${run.hypothesis.replace(/\|/g, '\\|')} |`
     );
   }
 
@@ -237,6 +369,7 @@ function renderMarkdown(report, sourcePath) {
 function main() {
   const { manifestPath, options } = parseArgs(process.argv.slice(2));
   const { manifest, resolvedPath } = readManifest(manifestPath);
+  validateManifest(manifest, { strict: options.strict });
   const report = scoreManifest(manifest);
   const output =
     options.format === 'json'

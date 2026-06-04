@@ -1,0 +1,32 @@
+{
+  "commands": [
+    {
+      "model": "parakeet-tdt-v3-coreml",
+      "command": "node scripts/asr-candidates/fluidaudio-coreml.js \"{audio}\"",
+      "checkCommand": "node scripts/asr-candidates/fluidaudio-coreml.js --preflight",
+      "disabled": true,
+      "disabledReason": "Requires macOS, Swift, and FLUIDAUDIO_PACKAGE_PATH pointing at a local FluidAudio checkout."
+    },
+    {
+      "model": "parakeet-tdt-v3-mlx",
+      "command": "parakeet-mlx \"{audio}\" --model mlx-community/parakeet-tdt-0.6b-v3",
+      "checkCommand": "parakeet-mlx --help",
+      "disabled": true,
+      "disabledReason": "Requires macOS Apple Silicon with the parakeet-mlx runtime installed."
+    },
+    {
+      "model": "qwen3-asr-0.6b",
+      "command": "python scripts/asr-candidates/qwen3-asr.py \"{audio}\" --model Qwen/Qwen3-ASR-0.6B",
+      "checkCommand": "python scripts/asr-candidates/qwen3-asr.py --preflight",
+      "disabled": true,
+      "disabledReason": "Install qwen-asr in an isolated Python 3.12 environment before enabling."
+    },
+    {
+      "model": "moonshine-streaming-tiny",
+      "command": "python scripts/asr-candidates/moonshine-transformers.py \"{audio}\" --model UsefulSensors/moonshine-streaming-tiny",
+      "checkCommand": "python scripts/asr-candidates/moonshine-transformers.py --preflight",
+      "disabled": true,
+      "disabledReason": "Install latest Transformers, torch, and datasets[audio] before enabling."
+    }
+  ]
+}
