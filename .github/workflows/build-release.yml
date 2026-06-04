@@ -480,16 +480,12 @@ jobs:
       - name: Verify portable exe
         shell: pwsh
         run: |
-          $verifierArgs = @(
-            "-InputFile", $env:PORTABLE_EXE_PATH,
-            "-MinSizeMB", "15"
-          )
-
           if ("${{ steps.windows-secrets.outputs.available }}" -eq "true") {
-            $verifierArgs += "-RequireSignature"
+            & ".\scripts\verify-windows-release.ps1" -InputFile $env:PORTABLE_EXE_PATH -MinSizeMB 15 -RequireSignature
+          } else {
+            & ".\scripts\verify-windows-release.ps1" -InputFile $env:PORTABLE_EXE_PATH -MinSizeMB 15
           }
 
-          & ".\scripts\verify-windows-release.ps1" @verifierArgs
           if ($LASTEXITCODE -ne 0) {
             throw "Windows release verifier failed"
           }
