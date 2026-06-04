@@ -196,7 +196,6 @@ jobs:
           }
 
       - name: Create portable exe
-        id: portable_exe
         shell: pwsh
         run: |
           # Debug: List all exe files in the target directory with sizes
@@ -436,13 +435,12 @@ jobs:
             throw "Failed to create portable exe"
           }
           "PORTABLE_EXE_PATH=$outputExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "portable_exe_path=$outputExe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Sign portable exe
         if: steps.windows-secrets.outputs.available == 'true'
         shell: pwsh
         env:
-          PORTABLE_EXE_PATH: ${{ steps.portable_exe.outputs.portable_exe_path }}
+          PORTABLE_EXE_PATH: apps/tray/src-tauri/target/release/dybur-windows-x64.exe
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
@@ -483,7 +481,7 @@ jobs:
       - name: Verify portable exe
         shell: pwsh
         env:
-          PORTABLE_EXE_PATH: ${{ steps.portable_exe.outputs.portable_exe_path }}
+          PORTABLE_EXE_PATH: apps/tray/src-tauri/target/release/dybur-windows-x64.exe
         run: |
           if (-not $env:PORTABLE_EXE_PATH) {
             throw "PORTABLE_EXE_PATH is empty"
@@ -507,7 +505,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dybur-windows-x64
-          path: ${{ steps.portable_exe.outputs.portable_exe_path }}
+          path: apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
       - name: Determine release tag
         id: release_tag
@@ -545,7 +543,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: |
-            ${{ steps.portable_exe.outputs.portable_exe_path }}
+            apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
       - name: Publish release artifact (main create)
         if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists != 'true'
@@ -555,7 +553,7 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.tag }}
           target_commitish: ${{ github.sha }}
           files: |
-            ${{ steps.portable_exe.outputs.portable_exe_path }}
+            apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
       - name: Publish release artifact (main existing)
         if: github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'true'
@@ -564,7 +562,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.release_tag.outputs.tag }}
           files: |
-            ${{ steps.portable_exe.outputs.portable_exe_path }}
+            apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
   build-macos:
     runs-on: macos-latest
