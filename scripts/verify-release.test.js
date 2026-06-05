@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +49,40 @@ function runVerifier(args) {
     cwd: repoRoot,
     encoding: 'utf8',
     windowsHide: true,
+  });
+}
+
+function runVerifierAsync(args, { env = {} } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [verifierPath, ...args], {
+      cwd: repoRoot,
+      env: { ...process.env, ...env },
+      windowsHide: true,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (status) => {
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+function listen(server) {
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      assert.equal(typeof address, 'object');
+      resolve(address.port);
+    });
   });
 }
 
@@ -160,5 +195,70 @@ describe('verify-release', () => {
       result.stdout,
       /Legacy release asset should not be published: dybur-portable\.exe/
     );
+  });
+
+  it('uses GitHub token for live API requests', async (t) => {
+    let authorization = null;
+    const server = http.createServer((request, response) => {
+      authorization = request.headers.authorization ?? null;
+      assert.equal(request.url, '/repos/oshtz/dybur/releases/latest');
+
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(baseRelease));
+    });
+    t.after(() => server.close());
+    const port = await listen(server);
+    const fixture = makeTempFixture(t, {});
+
+    const result = await runVerifierAsync(
+      [
+        '--package-json',
+        fixture.packageJsonPath,
+        '--api-base-url',
+        `http://127.0.0.1:${port}`,
+        '--skip-download-urls',
+        '--json',
+      ],
+      {
+        env: {
+          GITHUB_TOKEN: '',
+          GH_TOKEN: 'test-token',
+        },
+      }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(authorization, 'Bearer test-token');
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.ok, true);
+  });
+
+  it('suggests a GitHub token when unauthenticated API requests are forbidden', async (t) => {
+    const server = http.createServer((_request, response) => {
+      response.writeHead(403, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ message: 'rate limit exceeded' }));
+    });
+    t.after(() => server.close());
+    const port = await listen(server);
+    const fixture = makeTempFixture(t, {});
+
+    const result = await runVerifierAsync(
+      [
+        '--package-json',
+        fixture.packageJsonPath,
+        '--api-base-url',
+        `http://127.0.0.1:${port}`,
+        '--skip-download-urls',
+      ],
+      {
+        env: {
+          GITHUB_TOKEN: '',
+          GH_TOKEN: '',
+        },
+      }
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /set GITHUB_TOKEN or GH_TOKEN/);
   });
 });

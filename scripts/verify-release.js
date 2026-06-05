@@ -35,6 +35,7 @@ Options:
   --repo <owner/repo>        GitHub repository (default: ${DEFAULT_REPO})
   --package-json <file>     Package JSON used for expected version (default: package.json)
   --release-json <file>     Verify a release fixture instead of live GitHub
+  --api-base-url <url>      GitHub API base URL (default: https://api.github.com)
   --tag <tag>               Expected tag override (default: v<package.version>)
   --skip-download-urls      Skip HEAD checks for /latest/download asset URLs
   --json                    Print machine-readable summary
@@ -54,6 +55,7 @@ function parseArgs(argv) {
     repo: DEFAULT_REPO,
     packageJsonPath: 'package.json',
     releaseJsonPath: null,
+    apiBaseUrl: 'https://api.github.com',
     expectedTag: null,
     skipDownloadUrls: false,
     json: false,
@@ -71,6 +73,9 @@ function parseArgs(argv) {
         break;
       case '--release-json':
         options.releaseJsonPath = requireValue(args, '--release-json');
+        break;
+      case '--api-base-url':
+        options.apiBaseUrl = requireValue(args, '--api-base-url').replace(/\/+$/, '');
         break;
       case '--tag':
         options.expectedTag = requireValue(args, '--tag');
@@ -136,16 +141,33 @@ async function fetchWithRetry(url, init, { attempts = 3 } = {}) {
   throw lastError ?? new Error(`Failed to fetch ${url}`);
 }
 
+function getGitHubApiHeaders() {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'dybur-release-verifier',
+  };
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  return headers;
+}
+
 async function fetchJson(url) {
   const response = await fetchWithRetry(url, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'dybur-release-verifier',
-    },
+    headers: getGitHubApiHeaders(),
   });
 
   if (!response.ok) {
-    throw new Error(`GitHub API returned ${response.status} ${response.statusText}`);
+    const rateLimitHint =
+      response.status === 403 && !(process.env.GITHUB_TOKEN || process.env.GH_TOKEN)
+        ? '; set GITHUB_TOKEN or GH_TOKEN to use an authenticated API request'
+        : '';
+    throw new Error(
+      `GitHub API returned ${response.status} ${response.statusText}${rateLimitHint}`
+    );
   }
 
   return response.json();
@@ -160,7 +182,7 @@ async function readRelease(options) {
   const [owner, repo] = options.repo.split('/');
   const encodedOwner = encodeURIComponent(owner);
   const encodedRepo = encodeURIComponent(repo);
-  return fetchJson(`https://api.github.com/repos/${encodedOwner}/${encodedRepo}/releases/latest`);
+  return fetchJson(`${options.apiBaseUrl}/repos/${encodedOwner}/${encodedRepo}/releases/latest`);
 }
 
 async function verifyLatestDownloadUrl({ assetName, repo }) {

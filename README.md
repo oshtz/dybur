@@ -168,6 +168,8 @@ pnpm release:verify:windows
 
 The verifier checks that the latest GitHub release tag matches `package.json`, that the stable public assets are present (`dybur-macos-arm64.dmg` and `dybur-windows-x64.exe`), that known legacy asset names are absent, and that `/latest/download/` URLs resolve.
 
+`pnpm release:verify` uses the GitHub Releases API. Set `GITHUB_TOKEN` or `GH_TOKEN` to use an authenticated request when local unauthenticated GitHub API rate limits are exhausted.
+
 `pnpm release:verify:macos` downloads the public DMG, records SHA-256 and file size, and reports that deeper mount/codesign/Gatekeeper checks require macOS. On a Mac, run `node scripts/verify-macos-release.js --require-macos-checks` to make those checks mandatory. For CI fixtures or locally downloaded artifacts, run `node scripts/verify-macos-release.js --input-file path/to/dybur-macos-arm64.dmg --skip-macos-checks --expected-sha256 <hash>`.
 
 On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate. For locally built artifacts, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1 -InputFile path/to/dybur-windows-x64.exe -RequireSignature`.
