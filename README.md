@@ -180,6 +180,8 @@ The Windows release workflow signs the final portable EXE when these GitHub secr
 
 When the certificate secrets are configured, CI runs the Windows verifier with `-RequireSignature` before upload. Without those secrets, the release remains unsigned and the verifier reports Authenticode status as a warning.
 
+Use [docs/release-smoke-checklist.md](docs/release-smoke-checklist.md) for the manual macOS, Windows, landing page, and ASR candidate smoke checks that cannot be fully proven from a non-interactive CI run.
+
 ## Requirements
 
 - **macOS:** 10.15+ (Catalina or later)
