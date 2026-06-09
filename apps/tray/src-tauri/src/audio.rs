@@ -95,8 +95,42 @@ fn classify_audio_error(error: &str) -> AudioError {
 }
 
 /// Audio capture handler
+trait InputStreamHandle {
+    fn pause(&mut self) -> Result<(), AudioError>;
+}
+
+type ActiveInputStream = Box<dyn InputStreamHandle>;
+
+struct CpalInputStream {
+    stream: cpal::Stream,
+}
+
+impl CpalInputStream {
+    fn new(stream: cpal::Stream) -> Self {
+        Self { stream }
+    }
+}
+
+impl InputStreamHandle for CpalInputStream {
+    fn pause(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .pause()
+            .map_err(|e| classify_audio_error(&e.to_string()))
+    }
+}
+
+fn release_input_stream(stream: &mut Option<ActiveInputStream>) -> Result<(), AudioError> {
+    let Some(mut active_stream) = stream.take() else {
+        return Ok(());
+    };
+
+    let pause_result = active_stream.pause();
+    drop(active_stream);
+    pause_result
+}
+
 pub struct AudioCapture {
-    stream: Option<cpal::Stream>,
+    stream: Option<ActiveInputStream>,
     buffer: Arc<Mutex<Vec<f32>>>,
     last_error: Arc<Mutex<Option<AudioError>>>,
     sample_rate: u32,
@@ -205,7 +239,7 @@ impl AudioCapture {
             err
         })?;
 
-        self.stream = Some(stream);
+        self.stream = Some(Box::new(CpalInputStream::new(stream)));
         crate::log_info!(
             "audio",
             "Audio capture started at {}Hz ({}ch)",
@@ -217,8 +251,15 @@ impl AudioCapture {
 
     /// Stop capturing and return audio data
     pub fn stop(&mut self) -> Vec<f32> {
-        // Drop the stream to stop recording
-        self.stream.take();
+        if let Err(error) = release_input_stream(&mut self.stream) {
+            crate::log_warn!(
+                "audio",
+                "Failed to pause audio stream before release: {}",
+                error
+            );
+            let mut last_error = self.last_error.lock().unwrap();
+            *last_error = Some(error);
+        }
 
         // Get and clear the buffer
         let mut buffer = self.buffer.lock().unwrap();
@@ -257,7 +298,15 @@ impl AudioCapture {
     /// Stop the stream (drops it) without returning data
     /// Use this when retrieving data from the buffer Arc directly
     pub fn stop_stream(&mut self) {
-        self.stream.take();
+        if let Err(error) = release_input_stream(&mut self.stream) {
+            crate::log_warn!(
+                "audio",
+                "Failed to pause audio stream before release: {}",
+                error
+            );
+            let mut last_error = self.last_error.lock().unwrap();
+            *last_error = Some(error);
+        }
         crate::log_info!("audio", "Audio stream stopped");
     }
 
@@ -287,8 +336,7 @@ impl AudioCapture {
 
 impl Drop for AudioCapture {
     fn drop(&mut self) {
-        // Ensure stream is stopped
-        self.stream.take();
+        let _ = release_input_stream(&mut self.stream);
     }
 }
 
@@ -619,5 +667,47 @@ pub fn get_audio_error_help(error: &AudioError) -> String {
         AudioError::StreamError(_) | AudioError::Other(_) => {
             "Try restarting dybur. If the problem persists, check the logs for more details.".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct FakeInputStream {
+        paused: Arc<AtomicBool>,
+        dropped_after_pause: Arc<AtomicBool>,
+    }
+
+    impl InputStreamHandle for FakeInputStream {
+        fn pause(&mut self) -> Result<(), AudioError> {
+            self.paused.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl Drop for FakeInputStream {
+        fn drop(&mut self) {
+            self.dropped_after_pause
+                .store(self.paused.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn release_input_stream_pauses_before_dropping_stream() {
+        let paused = Arc::new(AtomicBool::new(false));
+        let dropped_after_pause = Arc::new(AtomicBool::new(false));
+        let mut stream: Option<ActiveInputStream> = Some(Box::new(FakeInputStream {
+            paused: Arc::clone(&paused),
+            dropped_after_pause: Arc::clone(&dropped_after_pause),
+        }));
+
+        release_input_stream(&mut stream).unwrap();
+
+        assert!(stream.is_none());
+        assert!(paused.load(Ordering::SeqCst));
+        assert!(dropped_after_pause.load(Ordering::SeqCst));
     }
 }

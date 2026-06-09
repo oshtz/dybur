@@ -1829,9 +1829,6 @@ fn add_basic_punctuation(text: &str) -> String {
 
 /// Stop recording and process audio
 fn stop_recording(app: &tauri::AppHandle) {
-    // Stop streaming inference first (if running)
-    let streaming_text = stop_streaming_inference();
-
     let state = app.state::<Mutex<AppState>>();
     let mut state_guard = state.inner().lock().unwrap();
 
@@ -1841,17 +1838,9 @@ fn stop_recording(app: &tauri::AppHandle) {
         return;
     }
 
-    // Emit final streaming result if available
-    if let Some(ref text) = streaming_text {
-        log_info!("streaming", "Final streaming text: {} chars", text.len());
-        let _ = app.emit(
-            "streaming-transcription",
-            serde_json::json!({
-                "text": text,
-                "is_final": true
-            }),
-        );
-    }
+    // Stop the streaming worker loop, but release the microphone before waiting
+    // on any streaming finalization work.
+    signal_streaming_inference_stop();
 
     let audio_data: Option<Vec<f32>> = match AUDIO_SESSION.stop() {
         Ok(Some(recorded)) => {
@@ -1896,6 +1885,19 @@ fn stop_recording(app: &tauri::AppHandle) {
 
     // Release the state lock before processing
     drop(state_guard);
+
+    // Emit final streaming result after the microphone stream has been released.
+    let streaming_text = finish_streaming_inference();
+    if let Some(ref text) = streaming_text {
+        log_info!("streaming", "Final streaming text: {} chars", text.len());
+        let _ = app.emit(
+            "streaming-transcription",
+            serde_json::json!({
+                "text": text,
+                "is_final": true
+            }),
+        );
+    }
 
     // Process audio with STT if we have audio data
     if let Some(audio) = audio_data {
@@ -2186,11 +2188,11 @@ fn start_streaming_inference(app: &tauri::AppHandle) {
     log_info!("streaming", "Streaming inference initialized");
 }
 
-/// Stop streaming inference and return final text if available
-fn stop_streaming_inference() -> Option<String> {
-    // Signal thread to stop
+fn signal_streaming_inference_stop() {
     STREAMING_RUNNING.store(false, Ordering::SeqCst);
+}
 
+fn finish_streaming_inference() -> Option<String> {
     // Give thread time to finish current iteration
     std::thread::sleep(std::time::Duration::from_millis(100));
 
