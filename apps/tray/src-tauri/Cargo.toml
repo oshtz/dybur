@@ -1,6 +1,6 @@
 [package]
 name = "dybur"
-version = "1.2.1"
+version = "1.2.2"
 description = "dybur - Local voice dictation"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
 license = "MIT"

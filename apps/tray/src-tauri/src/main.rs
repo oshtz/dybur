@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod audio_session;
 mod config;
 mod doctor;
 mod execution_providers;
@@ -21,7 +22,6 @@ mod stt;
 mod tokenizer;
 mod vad;
 
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -31,7 +31,8 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-use audio::{get_audio_error_help, list_input_devices, AudioCapture};
+use audio::{get_audio_error_help, list_input_devices};
+use audio_session::AudioSessionController;
 use config::{get_config_path, save_config};
 use injection::inject_text;
 use models::{
@@ -41,15 +42,13 @@ use models::{
 use state::{AppState, RecordingState};
 use stt::{get_model_paths, SttEngine};
 
-// Thread-local storage for AudioCapture (not Send+Sync due to cpal::Stream)
-// Note: Only used to keep the stream alive, not for data retrieval
-thread_local! {
-    static AUDIO_CAPTURE: RefCell<Option<AudioCapture>> = const { RefCell::new(None) };
-}
-
 // Global audio buffer for cross-thread access (the buffer Arc IS Send+Sync)
 lazy_static::lazy_static! {
     static ref RECORDING_BUFFER: Mutex<Option<Arc<Mutex<Vec<f32>>>>> = Mutex::new(None);
+}
+
+lazy_static::lazy_static! {
+    static ref AUDIO_SESSION: AudioSessionController = AudioSessionController::spawn();
 }
 
 // Global sample rate for the recording buffer (needed for resampling)
@@ -1730,45 +1729,28 @@ fn start_recording(app: &tauri::AppHandle) {
         }
     }
 
-    // Initialize and start audio capture
     let input_device = state_guard.config.input_device.clone();
-    match AudioCapture::new() {
-        Ok(mut capture) => {
-            if let Err(e) = capture.start(input_device.as_deref()) {
-                let help = get_audio_error_help(&e);
-                let error_msg = format!("{}\n\n{}", e, help);
-                state_guard.set_error(error_msg.clone());
-                log_error!("audio", "Failed to start recording: {}", error_msg);
-                update_tray_status(app, "Error: Recording failed");
-                return;
-            }
-            // Store buffer Arc and sample rate globally for cross-thread access
+    match AUDIO_SESSION.start(input_device) {
+        Ok(active_recording) => {
             {
-                let buffer_arc = capture.get_buffer_arc();
-                let sample_rate = capture.get_sample_rate();
                 let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
-                *global_buffer = Some(buffer_arc);
+                *global_buffer = Some(active_recording.buffer);
                 let mut global_sample_rate = RECORDING_SAMPLE_RATE.lock().unwrap();
-                *global_sample_rate = sample_rate;
+                *global_sample_rate = active_recording.sample_rate;
                 log_info!(
                     "audio",
                     "Recording buffer stored globally (sample_rate: {}Hz)",
-                    sample_rate
+                    active_recording.sample_rate
                 );
             }
 
-            // Store AudioCapture in thread-local to keep stream alive
-            AUDIO_CAPTURE.with(|cap| {
-                *cap.borrow_mut() = Some(capture);
-            });
             state_guard.set_recording(true);
             set_overlay_state(app, RecordingState::Recording);
             log_info!("audio", "Recording started");
             update_tray_status(app, "Recording...");
 
-            // Initialize streaming if enabled and model supports it
             let streaming_enabled = state_guard.config.streaming_enabled;
-            drop(state_guard); // Release state lock before starting streaming
+            drop(state_guard);
 
             if streaming_enabled {
                 start_streaming_inference(app);
@@ -1779,8 +1761,8 @@ fn start_recording(app: &tauri::AppHandle) {
             let error_msg = format!("{}\n\n{}", e, help);
             state_guard.set_error(error_msg.clone());
             set_overlay_state(app, RecordingState::Idle);
-            log_error!("audio", "Failed to initialize audio: {}", error_msg);
-            update_tray_status(app, "Error: Audio init failed");
+            log_error!("audio", "Failed to start recording: {}", error_msg);
+            update_tray_status(app, "Error: Recording failed");
         }
     }
 }
@@ -1871,53 +1853,33 @@ fn stop_recording(app: &tauri::AppHandle) {
         );
     }
 
-    // Retrieve audio data from global buffer (works across threads)
-    let audio_data: Option<Vec<f32>> = {
-        let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
-        let sample_rate = *RECORDING_SAMPLE_RATE.lock().unwrap();
-        if let Some(buffer_arc) = global_buffer.take() {
-            let mut buffer = buffer_arc.lock().unwrap();
-            let data = std::mem::take(&mut *buffer);
-            let duration = data.len() as f32 / sample_rate as f32;
+    let audio_data: Option<Vec<f32>> = match AUDIO_SESSION.stop() {
+        Ok(Some(recorded)) => {
+            let duration = recorded.samples.len() as f32 / recorded.sample_rate as f32;
             log_info!(
                 "audio",
-                "Retrieved {:.2}s of audio from global buffer ({}Hz)",
-                duration,
-                sample_rate
+                "Audio session stopped. Captured {:.2}s of audio",
+                duration
             );
-
-            // Resample to 16kHz if needed (VAD and STT expect 16kHz)
-            const TARGET_SAMPLE_RATE: u32 = 16000;
-            if sample_rate != TARGET_SAMPLE_RATE {
-                log_info!(
-                    "audio",
-                    "Resampling audio from {}Hz to {}Hz",
-                    sample_rate,
-                    TARGET_SAMPLE_RATE
-                );
-                let resampled = audio::resample_linear(&data, sample_rate, TARGET_SAMPLE_RATE);
-                log_info!(
-                    "audio",
-                    "Resampled {} -> {} samples",
-                    data.len(),
-                    resampled.len()
-                );
-                Some(resampled)
-            } else {
-                Some(data)
-            }
-        } else {
-            log_warn!("audio", "No recording buffer found!");
+            Some(recorded.samples)
+        }
+        Ok(None) => {
+            log_warn!("audio", "No active audio capture session found");
+            None
+        }
+        Err(e) => {
+            let help = get_audio_error_help(&e);
+            let error_msg = format!("{}\n\n{}", e, help);
+            state_guard.set_error(error_msg.clone());
+            log_error!("audio", "Failed to stop recording: {}", error_msg);
             None
         }
     };
 
-    // Try to stop the stream (may be on different thread, that's OK)
-    AUDIO_CAPTURE.with(|capture| {
-        if let Some(mut cap) = capture.borrow_mut().take() {
-            cap.stop_stream();
-        }
-    });
+    {
+        let mut global_buffer = RECORDING_BUFFER.lock().unwrap();
+        *global_buffer = None;
+    }
 
     state_guard.set_recording(false);
     set_overlay_state(app, RecordingState::Idle);

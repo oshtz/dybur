@@ -38,8 +38,9 @@ Then install and check:
 4. Confirm Gatekeeper allows launch and the app identity looks expected.
 5. Grant microphone and Accessibility permissions.
 6. Focus a normal text field, record a short dictation, and confirm text is inserted.
-7. Focus a password field and confirm dybur does not inject dictated text.
-8. Restart the app and confirm settings, hotkey, model selection, and tray controls persist.
+7. Stop recording and confirm the macOS microphone privacy indicator clears within 1 second.
+8. Focus a password field and confirm dybur does not inject dictated text.
+9. Restart the app and confirm settings, hotkey, model selection, and tray controls persist.
 
 ## Windows Manual Smoke
 
