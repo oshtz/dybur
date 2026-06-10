@@ -20,6 +20,7 @@ mod state;
 mod streaming;
 mod stt;
 mod tokenizer;
+mod updater;
 mod vad;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +86,15 @@ const STREAMING_POLL_INTERVAL_MS: u64 = 100;
 
 /// Application entry point
 fn main() {
+    match updater::run_helper_from_env() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("dybur update helper failed: {}", error);
+            std::process::exit(1);
+        }
+    }
+
     // Check for single instance
     let _instance_guard = acquire_single_instance();
 
@@ -260,6 +270,8 @@ fn main() {
                 });
             }
 
+            start_update_check(app.handle().clone(), false);
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -302,6 +314,8 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     let run_diagnostics =
         MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
     let run_setup = MenuItemBuilder::with_id("run_setup", "Run Setup Wizard...").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id("check_updates", "Check for Updates...").build(app)?;
     #[cfg(not(target_os = "windows"))]
     let install_cli =
         MenuItemBuilder::with_id("install_cli", "Install Command Line Tool...").build(app)?;
@@ -310,7 +324,8 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     let settings_builder = SubmenuBuilder::with_id(app, "settings", "Settings")
         .item(&open_config)
         .item(&run_diagnostics)
-        .item(&run_setup);
+        .item(&run_setup)
+        .item(&check_updates);
 
     #[cfg(not(target_os = "windows"))]
     let settings_builder = settings_builder.item(&install_cli);
@@ -686,6 +701,9 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         "run_setup" => {
             run_setup_wizard(app);
         }
+        "check_updates" => {
+            start_update_check(app.clone(), true);
+        }
         #[cfg(not(target_os = "windows"))]
         "install_cli" => {
             install_cli_to_path(app);
@@ -834,6 +852,97 @@ fn run_setup_wizard(app: &tauri::AppHandle) {
             log_error!("service", "Failed to show setup wizard: {}", e);
         }
     });
+}
+
+fn start_update_check(app: tauri::AppHandle, interactive: bool) {
+    std::thread::spawn(move || {
+        if !interactive {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if cfg!(debug_assertions) {
+                log_info!("updates", "Skipping automatic update check in debug build");
+                return;
+            }
+            if std::env::var_os("DYBUR_DISABLE_AUTO_UPDATE").is_some() {
+                log_info!("updates", "Automatic update check disabled by environment");
+                return;
+            }
+        }
+
+        if let Err(error) = run_update_check(&app, interactive) {
+            log_error!("updates", "Update check failed: {}", error);
+            if interactive {
+                show_user_alert("dybur Update", &format!("Update check failed: {}", error));
+            }
+        }
+    });
+}
+
+fn run_update_check(app: &tauri::AppHandle, interactive: bool) -> Result<(), String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    log_info!("updates", "Checking for updates from v{}", current_version);
+
+    let Some(update) = updater::check_for_update(current_version)? else {
+        log_info!("updates", "dybur is up to date");
+        if interactive {
+            show_user_notification("dybur Update", "dybur is already up to date.");
+        }
+        return Ok(());
+    };
+
+    if is_recording_or_processing(app) {
+        let message =
+            "Update available, but dybur is recording or processing. Try again when idle.";
+        log_info!("updates", "{}", message);
+        if interactive {
+            show_user_alert("dybur Update", message);
+        }
+        return Ok(());
+    }
+
+    let platform = updater::install_platform_for_key(&update.platform_key)
+        .ok_or_else(|| format!("Unsupported update platform: {}", update.platform_key))?;
+
+    log_info!(
+        "updates",
+        "Downloading dybur v{} for {}",
+        update.version,
+        update.platform_key
+    );
+    show_user_notification(
+        "dybur Update",
+        &format!("Downloading dybur v{}...", update.version),
+    );
+
+    let artifact_path = updater::download_update_artifact(&update, &updater::update_work_dir())?;
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to locate current executable: {}", e))?;
+    let helper_args = updater::helper_install_args_for(
+        platform,
+        std::process::id(),
+        artifact_path,
+        current_exe.clone(),
+        updater::updater_log_path(),
+    )?;
+
+    log_info!(
+        "updates",
+        "Launching update helper for dybur v{}",
+        update.version
+    );
+    updater::spawn_update_helper(&helper_args, &current_exe)?;
+
+    QUIT_REQUESTED.store(true, Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
+}
+
+fn is_recording_or_processing(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<Mutex<AppState>>();
+    let state_guard = state.inner().lock().unwrap();
+    matches!(
+        state_guard.recording_state,
+        RecordingState::Recording | RecordingState::Processing
+    ) || state_guard.is_recording
 }
 
 /// Show about dialog
@@ -2489,6 +2598,20 @@ fn get_hotkey_error_help(error: &str) -> String {
     }
 
     "Check the logs for more details. Try a different hotkey combination.".to_string()
+}
+
+fn show_user_notification(title: &str, message: &str) {
+    #[cfg(target_os = "windows")]
+    show_windows_notification(title, message);
+    #[cfg(target_os = "macos")]
+    show_macos_notification(title, message);
+}
+
+fn show_user_alert(title: &str, message: &str) {
+    #[cfg(target_os = "windows")]
+    show_windows_alert(title, message);
+    #[cfg(target_os = "macos")]
+    show_macos_alert(title, message);
 }
 
 /// Show Windows notification (toast style)

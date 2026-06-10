@@ -17,7 +17,7 @@ pnpm release:verify:windows
 Expected results:
 
 - Latest GitHub release tag matches `package.json`.
-- Public assets are exactly `dybur-macos-arm64.dmg` and `dybur-windows-x64.exe`.
+- Public assets are exactly `dybur-macos-arm64.dmg`, `dybur-windows-x64.exe`, and `dybur-update.json`.
 - Legacy public asset names are absent.
 - `/latest/download/` URLs resolve.
 - macOS DMG and Windows EXE download, meet size floors, and print SHA-256 values.

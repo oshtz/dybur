@@ -10,6 +10,23 @@ import { describe, it } from 'node:test';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const verifierPath = path.join(repoRoot, 'scripts', 'verify-release.js');
 
+const baseUpdateManifest = {
+  version: '1.2.1',
+  pub_date: '2026-05-29T18:43:15Z',
+  platforms: {
+    'windows-x64': {
+      url: 'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-windows-x64.exe',
+      sha256: 'a'.repeat(64),
+      size: 42 * 1024 * 1024,
+    },
+    'darwin-arm64': {
+      url: 'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-macos-arm64.dmg',
+      sha256: 'b'.repeat(64),
+      size: 16 * 1024 * 1024,
+    },
+  },
+};
+
 const baseRelease = {
   tag_name: 'v1.2.1',
   published_at: '2026-05-29T18:43:15Z',
@@ -28,6 +45,13 @@ const baseRelease = {
       size: 42 * 1024 * 1024,
       browser_download_url:
         'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-windows-x64.exe',
+    },
+    {
+      name: 'dybur-update.json',
+      size: 700,
+      browser_download_url:
+        'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-update.json',
+      content: baseUpdateManifest,
     },
   ],
 };
@@ -105,6 +129,7 @@ describe('verify-release', () => {
     assert.equal(summary.expectedTag, 'v1.2.1');
     assert.equal(summary.actualTag, 'v1.2.1');
     assert.deepEqual(summary.issues, []);
+    assert.equal(summary.manifestCheck.ok, true);
   });
 
   it('fails when the latest release tag does not match the package version', (t) => {
@@ -142,6 +167,58 @@ describe('verify-release', () => {
 
     assert.equal(result.status, 1);
     assert.match(result.stdout, /Missing Windows x64 portable EXE: dybur-windows-x64\.exe/);
+  });
+
+  it('fails when the update manifest asset is missing', (t) => {
+    const fixture = makeTempFixture(t, {
+      release: {
+        ...baseRelease,
+        assets: baseRelease.assets.filter((asset) => asset.name !== 'dybur-update.json'),
+      },
+    });
+
+    const result = runVerifier([
+      '--package-json',
+      fixture.packageJsonPath,
+      '--release-json',
+      fixture.releaseJsonPath,
+      '--skip-download-urls',
+    ]);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /Missing update manifest: dybur-update\.json/);
+  });
+
+  it('fails when the update manifest omits a required platform', (t) => {
+    const fixture = makeTempFixture(t, {
+      release: {
+        ...baseRelease,
+        assets: baseRelease.assets.map((asset) =>
+          asset.name === 'dybur-update.json'
+            ? {
+                ...asset,
+                content: {
+                  ...baseUpdateManifest,
+                  platforms: {
+                    'windows-x64': baseUpdateManifest.platforms['windows-x64'],
+                  },
+                },
+              }
+            : asset
+        ),
+      },
+    });
+
+    const result = runVerifier([
+      '--package-json',
+      fixture.packageJsonPath,
+      '--release-json',
+      fixture.releaseJsonPath,
+      '--skip-download-urls',
+    ]);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /Update manifest missing platform darwin-arm64/);
   });
 
   it('fails when a stable asset is too small', (t) => {

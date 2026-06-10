@@ -19,6 +19,31 @@ Fast, local, private voice dictation for macOS and Windows.
 
 Download the latest release from [GitHub Releases](https://github.com/oshtz/dybur/releases).
 
+## Updates
+
+dybur checks for updates automatically when the tray app starts. You can also run
+a manual check from the tray menu with **Check for Updates...**.
+
+Updates are installed from the public `dybur-update.json` manifest attached to the
+latest GitHub release. The manifest points to the stable platform artifacts:
+
+- `dybur-windows-x64.exe` for the portable Windows app
+- `dybur-macos-arm64.dmg` for the macOS installer
+
+Downloaded artifacts are verified with SHA-256 before installation. On Windows,
+dybur exits and a helper process replaces the portable EXE, then relaunches the
+app. On macOS, the helper mounts the DMG, replaces the installed `.app` bundle,
+clears the quarantine attribute on the replacement bundle, detaches the DMG, and
+relaunches dybur.
+
+Set `DYBUR_DISABLE_AUTO_UPDATE=1` before launching dybur to skip automatic
+startup checks. Manual checks from the tray menu still run.
+
+For local release testing, set `DYBUR_UPDATE_MANIFEST_URL` to point dybur at a
+test manifest instead of the public GitHub `latest` manifest. This override
+applies to manual tray checks and to automatic startup checks in release builds.
+Debug builds still skip automatic startup checks.
+
 ## Usage
 
 1. Launch the app (or run `dybur start` from CLI)
@@ -120,7 +145,6 @@ dybur models candidates # Show experimental model candidates
 | Model                         | Size    | Languages | Description                                             |
 | ----------------------------- | ------- | --------- | ------------------------------------------------------- |
 | `parakeet-tdt-v3-int8`        | ~670 MB | 25        | **Default.** Multilingual transducer, balanced accuracy |
-| `parakeet-tdt-v2-int8`        | ~660 MB | English   | Fast English-only transducer                            |
 | `nemotron-streaming-int8`     | ~660 MB | English   | Low-latency streaming transducer                        |
 | `whisper-large-v3-turbo-int8` | ~1.1 GB | 99        | OpenAI Whisper, broad language support                  |
 | `whisper-large-v3-turbo-fp16` | ~1.6 GB | 99        | Whisper FP16, higher accuracy                           |
@@ -166,11 +190,47 @@ pnpm release:verify:macos
 pnpm release:verify:windows
 ```
 
-The verifier checks that the latest GitHub release tag matches `package.json`, that the stable public assets are present (`dybur-macos-arm64.dmg` and `dybur-windows-x64.exe`), that known legacy asset names are absent, and that `/latest/download/` URLs resolve.
+The verifier checks that the latest GitHub release tag matches `package.json`, that the stable public assets are present (`dybur-macos-arm64.dmg`, `dybur-windows-x64.exe`, and `dybur-update.json`), that the update manifest contains the expected platform URLs and SHA-256 hashes, that known legacy asset names are absent, and that `/latest/download/` URLs resolve.
 
 `pnpm release:verify` uses the GitHub Releases API. Set `GITHUB_TOKEN` or `GH_TOKEN` to use an authenticated request when local unauthenticated GitHub API rate limits are exhausted.
 
 `pnpm release:verify:macos` downloads the public DMG, records SHA-256 and file size, and reports that deeper mount/codesign/Gatekeeper checks require macOS. On a Mac, run `node scripts/verify-macos-release.js --require-macos-checks` to make those checks mandatory. For CI fixtures or locally downloaded artifacts, run `node scripts/verify-macos-release.js --input-file path/to/dybur-macos-arm64.dmg --skip-macos-checks --expected-sha256 <hash>`.
+
+Before pushing updater changes, build on macOS and smoke-test the local DMG
+installer path against a throwaway app bundle:
+
+```sh
+pnpm --filter @dybur/config --filter @dybur/core --filter @dybur/cli build
+pnpm --dir apps/tray build -- --target aarch64-apple-darwin
+
+DMG="$(find apps/tray/src-tauri/target -name '*.dmg' -type f | head -n 1)"
+HELPER="$(find apps/tray/src-tauri/target -path '*/release/dybur' -type f | head -n 1)"
+TMP="$(mktemp -d)"
+TARGET="$TMP/Installed/dybur.app"
+LOG="$TMP/updater.log"
+
+mkdir -p "$TARGET/Contents/MacOS"
+printf '#!/bin/sh\necho old\n' > "$TARGET/Contents/MacOS/dybur"
+chmod +x "$TARGET/Contents/MacOS/dybur"
+touch "$TARGET/Contents/old-marker"
+
+DYBUR_UPDATE_HELPER_SKIP_RELAUNCH=1 "$HELPER" \
+  --dybur-update-helper \
+  --platform macos-dmg \
+  --pid 999999 \
+  --artifact "$DMG" \
+  --target-exe "$TARGET/Contents/MacOS/dybur" \
+  --bundle "$TARGET" \
+  --relaunch "$TARGET/Contents/MacOS/dybur" \
+  --log "$LOG"
+
+test -x "$TARGET/Contents/MacOS/dybur"
+test ! -e "$TARGET/Contents/old-marker"
+test ! -d "$TARGET.bak"
+grep -q "installing macOS DMG update" "$LOG"
+grep -q "skipping relaunch" "$LOG"
+echo "macOS updater helper smoke passed"
+```
 
 On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate. For locally built artifacts, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1 -InputFile path/to/dybur-windows-x64.exe -RequireSignature`.
 

@@ -751,3 +751,93 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.tag }}
           files: |
             ${{ steps.find-artifacts.outputs.dmg_path }}
+
+  publish-update-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Determine release tag
+        id: release_tag
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="v${version}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate update manifest
+        shell: bash
+        env:
+          VERSION: ${{ steps.release_tag.outputs.version }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          function findArtifact(name) {
+            const root = path.resolve('release-artifacts');
+            const stack = [root];
+            while (stack.length > 0) {
+              const current = stack.pop();
+              for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+                const fullPath = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                  stack.push(fullPath);
+                } else if (entry.name === name) {
+                  return fullPath;
+                }
+              }
+            }
+            throw new Error(`Artifact not found: ${name}`);
+          }
+
+          function describeArtifact(name) {
+            const artifactPath = findArtifact(name);
+            const bytes = fs.readFileSync(artifactPath);
+            return {
+              url: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.TAG}/${name}`,
+              sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+              size: bytes.length,
+            };
+          }
+
+          const manifest = {
+            version: process.env.VERSION,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              'windows-x64': describeArtifact('dybur-windows-x64.exe'),
+              'darwin-arm64': describeArtifact('dybur-macos-arm64.dmg'),
+            },
+          };
+
+          fs.writeFileSync('dybur-update.json', `${JSON.stringify(manifest, null, 2)}\n`);
+          console.log(JSON.stringify(manifest, null, 2));
+          NODE
+
+      - name: Publish update manifest
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          files: |
+            dybur-update.json
