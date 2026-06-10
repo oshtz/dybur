@@ -408,6 +408,7 @@ var MODEL_REGISTRY = [
     sizeBytes: 661e6,
     languages: ["en"],
     isDefault: false,
+    visibility: "legacy",
     config: {
       vocabType: "text_file",
       sampleRate: 16e3,
@@ -433,6 +434,7 @@ var MODEL_REGISTRY = [
     sizeBytes: 67e7,
     languages: ["en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "uk", "ja", "ko", "zh"],
     isDefault: true,
+    visibility: "normal",
     config: {
       vocabType: "text_file",
       sampleRate: 16e3,
@@ -457,6 +459,7 @@ var MODEL_REGISTRY = [
     sizeBytes: 663e6,
     languages: ["en"],
     isDefault: false,
+    visibility: "normal",
     config: {
       vocabType: "text_file",
       sampleRate: 16e3,
@@ -483,6 +486,7 @@ var MODEL_REGISTRY = [
     languages: [],
     // All languages
     isDefault: false,
+    visibility: "normal",
     config: {
       vocabType: "bpe",
       sampleRate: 16e3,
@@ -508,6 +512,7 @@ var MODEL_REGISTRY = [
     sizeBytes: 16e8,
     languages: [],
     isDefault: false,
+    visibility: "normal",
     config: {
       vocabType: "bpe",
       sampleRate: 16e3,
@@ -528,7 +533,7 @@ function getDefaultModelDefinition() {
   return defaultModel;
 }
 function getAvailableModels() {
-  return MODEL_REGISTRY;
+  return MODEL_REGISTRY.filter((model) => model.visibility === "normal");
 }
 function normalizeModelName(name) {
   const legacyMap = {
@@ -761,6 +766,22 @@ var MODEL_CANDIDATES = [
     benchmarkHint: 'node scripts/asr-candidates/fluidaudio-coreml.js "{audio}"'
   },
   {
+    id: "nemotron-35-asr-streaming-onnx-int4",
+    displayName: "Nemotron 3.5 ASR Streaming ONNX INT4",
+    provider: "ONNX Community / NVIDIA",
+    sourceUrl: "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+    runtime: "onnxruntime_genai",
+    platforms: ["darwin-arm64", "windows-x64", "linux-x64"],
+    license: "MIT",
+    sizeLabel: "~0.67 GB INT4 ONNX",
+    languageLabel: "40 language-locales; English transcription-ready",
+    recommendation: "recommended",
+    rationale: "Best current spike for dybur live dictation: newer cache-aware Nemotron 3.5 streaming model, ONNX/int4 packaging, configurable low-latency chunking, punctuation, and capitalization.",
+    integrationRisk: "The ONNX INT4 export uses an ONNX Runtime GenAI-style package rather than dybur's current sherpa encoder/decoder/joiner session layout, so it needs a runtime adapter before becoming a production model ID.",
+    nextStep: "Benchmark with the candidate runner using the ONNX Runtime GenAI wrapper, then prototype a native ONNX Runtime GenAI adapter if WER and latency beat the current Nemotron export.",
+    benchmarkHint: 'python scripts/asr-candidates/nemotron35-ortgenai.py "{audio}" --model onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4'
+  },
+  {
     id: "parakeet-tdt-v3-mlx",
     displayName: "Parakeet TDT v3 MLX",
     provider: "mlx-community",
@@ -949,7 +970,7 @@ import { promisify } from "util";
 var execAsync = promisify(exec);
 var GITHUB_REPO = "oshtz/dybur";
 var GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
-var TRAY_APP_VERSION = "v1.2.1";
+var TRAY_APP_VERSION = "v1.2.4";
 function getTrayAssetName() {
   const platform2 = getPlatform();
   const arch = getArch();

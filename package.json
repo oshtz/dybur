@@ -1,13 +1,13 @@
 {
   "name": "dybur-monorepo",
   "private": true,
-  "version": "1.2.3",
+  "version": "1.2.4",
   "type": "module",
   "description": "Fast, local, private voice dictation",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test && pnpm test:scripts",
-    "test:scripts": "node --test scripts/asr-candidate-runner.test.js scripts/asr-eval.test.js scripts/asr-gate.test.js scripts/asr-manifest-check.test.js scripts/cli-candidates.test.js scripts/verify-macos-release.test.js scripts/verify-release.test.js scripts/verify-windows-release.test.js",
+    "test:scripts": "node --test scripts/asr-candidate-runner.test.js scripts/asr-eval.test.js scripts/asr-gate.test.js scripts/asr-manifest-check.test.js scripts/asr-runtime-readiness.test.js scripts/cli-candidates.test.js scripts/verify-macos-release.test.js scripts/verify-release.test.js scripts/verify-windows-release.test.js",
     "lint": "eslint \"packages/**/*.ts\"",
     "format": "prettier --write \"packages/**/*.ts\"",
     "typecheck": "pnpm --filter @dybur/config build && pnpm --filter @dybur/core build && pnpm -r typecheck",
@@ -15,6 +15,7 @@
     "eval:asr:gate": "node scripts/asr-gate.js",
     "eval:asr:manifest": "node scripts/asr-manifest-check.js",
     "eval:asr:candidates": "node scripts/asr-candidate-runner.js",
+    "eval:asr:runtime-ready": "node scripts/asr-runtime-readiness.js",
     "release:verify": "node scripts/verify-release.js",
     "release:verify:macos": "node scripts/verify-macos-release.js",
     "release:verify:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1"

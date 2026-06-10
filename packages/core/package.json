@@ -1,6 +1,6 @@
 {
   "name": "@dybur/core",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Core business logic for dybur",
   "type": "module",
   "main": "./dist/index.js",

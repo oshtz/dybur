@@ -192,6 +192,129 @@ describe('asr-candidate-runner', () => {
     assert.equal(typeof output.runs[0].completedAt, 'string');
   });
 
+  it('runs exactly the repeated --model selections', (t) => {
+    const fixture = makeTempFixture();
+    t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+
+    writeCommands(fixture.commandsPath, [
+      {
+        model: 'baseline-model',
+        command: `${JSON.stringify(process.execPath)} -e "console.log('hello world')"`,
+      },
+      {
+        model: 'candidate-model',
+        command: `${JSON.stringify(process.execPath)} -e "console.log('hello brave world')"`,
+      },
+      {
+        model: 'unselected-model',
+        command: `${JSON.stringify(process.execPath)} -e "process.exit(9)"`,
+      },
+    ]);
+
+    const result = runRunner([
+      fixture.manifestPath,
+      '--commands',
+      fixture.commandsPath,
+      '--output',
+      fixture.outputPath,
+      '--model',
+      'baseline-model',
+      '--model',
+      'candidate-model',
+    ]);
+
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(fs.readFileSync(fixture.outputPath, 'utf8'));
+    assert.equal(output.metadata.selectedModel, null);
+    assert.deepEqual(output.metadata.selectedModels, ['baseline-model', 'candidate-model']);
+    assert.deepEqual(
+      output.runs.map((run) => `${run.model}:${run.hypothesis}`),
+      ['baseline-model:hello world', 'candidate-model:hello brave world']
+    );
+  });
+
+  it('runs batch commands once per model and uses reported per-sample latencies', (t) => {
+    const fixture = makeTempFixture();
+    t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+
+    const secondAudioPath = path.join(fixture.dir, 'sample-2.wav');
+    fs.writeFileSync(secondAudioPath, 'second fixture audio');
+    fs.writeFileSync(
+      fixture.manifestPath,
+      `${JSON.stringify(
+        {
+          samples: [
+            {
+              id: 'sample-1',
+              reference: 'hello world',
+              audio: 'sample.wav',
+              durationMs: 1234,
+            },
+            {
+              id: 'sample-2',
+              reference: 'batch mode',
+              audio: 'sample-2.wav',
+              durationMs: 2345,
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const batchScript = path.join(fixture.dir, 'batch-runner.mjs');
+    fs.writeFileSync(
+      batchScript,
+      `
+import fs from 'node:fs';
+const [manifestPath, outputPath] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+fs.writeFileSync(
+  outputPath,
+  JSON.stringify({
+    runs: manifest.samples.map((sample, index) => ({
+      sampleId: sample.id,
+      hypothesis: index === 0 ? 'hello world' : 'batch mode',
+      latencyMs: 100 + index,
+    })),
+  })
+);
+`
+    );
+
+    writeCommands(fixture.commandsPath, [
+      {
+        model: 'batch-model',
+        command: `${JSON.stringify(process.execPath)} -e "process.exit(9)"`,
+        batchCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(
+          batchScript
+        )} "{manifest}" "{output}"`,
+      },
+    ]);
+
+    const result = runRunner([
+      fixture.manifestPath,
+      '--commands',
+      fixture.commandsPath,
+      '--output',
+      fixture.outputPath,
+    ]);
+
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(fs.readFileSync(fixture.outputPath, 'utf8'));
+    assert.equal(output.metadata.commands[0].batchCommand != null, true);
+    assert.deepEqual(
+      output.runs.map((run) => [run.model, run.sampleId, run.hypothesis, run.latencyMs]),
+      [
+        ['batch-model', 'sample-1', 'hello world', 100],
+        ['batch-model', 'sample-2', 'batch mode', 101],
+      ]
+    );
+    assert.match(output.runs[0].command, /batch-runner\.mjs/);
+    assert.equal(fs.existsSync(path.join(fixture.dir, 'runs.batch-model.batch.json')), true);
+  });
+
   it('reports disabled-only selections with their setup reason', (t) => {
     const fixture = makeTempFixture();
     t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));

@@ -81,6 +81,7 @@ const OVERLAY_LABEL: &str = "overlay";
 const OVERLAY_WIDTH: f64 = 280.0;
 const OVERLAY_HEIGHT: f64 = 100.0; // Increased to fit streaming text
 const OVERLAY_MARGIN: f64 = 28.0;
+const STREAMING_POLL_INTERVAL_MS: u64 = 100;
 
 /// Application entry point
 fn main() {
@@ -2143,35 +2144,60 @@ fn start_streaming_inference(app: &tauri::AppHandle) {
         log_info!("streaming", "Streaming inference thread started");
 
         while STREAMING_RUNNING.load(Ordering::SeqCst) {
-            // Poll every 500ms
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(STREAMING_POLL_INTERVAL_MS));
 
             if !STREAMING_RUNNING.load(Ordering::SeqCst) {
                 break;
             }
 
             // Process incremental audio
-            let partial_text = {
+            let process_result = {
                 let mut streaming_state = STREAMING_STATE.lock().unwrap();
                 let mut engine = STT_ENGINE.lock().unwrap();
 
                 if let Some(ref mut state) = *streaming_state {
-                    match streaming::process_incremental(state, &buffer_arc, &mut engine) {
-                        Ok(Some(text)) => Some(text),
-                        Ok(None) => None,
+                    match streaming::process_incremental_with_metrics(
+                        state,
+                        &buffer_arc,
+                        &mut engine,
+                    ) {
+                        Ok(result) => result,
                         Err(e) => {
                             log_warn!("streaming", "Streaming inference error: {}", e);
-                            None
+                            streaming::StreamingProcessResult::default()
                         }
                     }
                 } else {
-                    None
+                    streaming::StreamingProcessResult::default()
                 }
             };
 
+            for metrics in &process_result.metrics {
+                log_debug!(
+                    "streaming",
+                    "Chunk {} metrics: available_audio_ms={} processed_audio_ms={} backlog_ms={} tokens_emitted={} partial_chars={} feature_ms={:.2} encoder_ms={:.2} decoder_ms={:.2} joiner_ms={:.2} total_ms={:.2}",
+                    metrics.chunk_index,
+                    metrics.available_audio_ms,
+                    metrics.processed_audio_ms,
+                    metrics.backlog_ms,
+                    metrics.tokens_emitted,
+                    metrics.partial_chars,
+                    metrics.feature_ms,
+                    metrics.encoder_ms,
+                    metrics.decoder_ms,
+                    metrics.joiner_ms,
+                    metrics.total_ms
+                );
+                let _ = app_handle.emit("streaming-metrics", metrics);
+            }
+
             // Emit partial transcription to frontend
-            if let Some(text) = partial_text {
-                log_debug!("streaming", "Partial transcription: {}", text);
+            if let Some(text) = process_result.partial_text {
+                log_debug!(
+                    "streaming",
+                    "Partial transcription updated ({} chars)",
+                    text.chars().count()
+                );
                 let _ = app_handle.emit(
                     "streaming-transcription",
                     serde_json::json!({

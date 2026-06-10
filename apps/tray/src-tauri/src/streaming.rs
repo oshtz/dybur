@@ -5,7 +5,9 @@
 
 use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
 use ort::value::TensorRef;
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::audio::resample_linear;
 use crate::stt::{StreamingMetadata, SttEngine, SttError};
@@ -13,7 +15,80 @@ use crate::stt::{StreamingMetadata, SttEngine, SttError};
 /// Audio processing constants (must match stt.rs)
 const SAMPLE_RATE: u32 = 16000;
 const HOP_LENGTH: usize = 160;
+const WIN_LENGTH: usize = 400;
 const N_MELS: usize = 128;
+const MAX_CHUNKS_PER_INCREMENTAL_CALL: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct StreamingStageTimings {
+    pub feature_ms: f64,
+    pub encoder_ms: f64,
+    pub decoder_ms: f64,
+    pub joiner_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StreamingMetrics {
+    pub chunk_index: usize,
+    pub available_audio_ms: u64,
+    pub processed_audio_ms: u64,
+    pub backlog_ms: u64,
+    pub tokens_emitted: usize,
+    pub partial_chars: usize,
+    pub feature_ms: f64,
+    pub encoder_ms: f64,
+    pub decoder_ms: f64,
+    pub joiner_ms: f64,
+    pub total_ms: f64,
+}
+
+impl StreamingMetrics {
+    pub fn new(
+        chunk_index: usize,
+        total_samples: usize,
+        processed_samples: usize,
+        source_sample_rate: u32,
+        tokens_before: usize,
+        tokens_after: usize,
+        partial_chars: usize,
+        timings: StreamingStageTimings,
+    ) -> Self {
+        let processed_samples = processed_samples.min(total_samples);
+
+        Self {
+            chunk_index,
+            available_audio_ms: samples_to_ms(total_samples, source_sample_rate),
+            processed_audio_ms: samples_to_ms(processed_samples, source_sample_rate),
+            backlog_ms: samples_to_ms(
+                total_samples.saturating_sub(processed_samples),
+                source_sample_rate,
+            ),
+            tokens_emitted: tokens_after.saturating_sub(tokens_before),
+            partial_chars,
+            feature_ms: timings.feature_ms,
+            encoder_ms: timings.encoder_ms,
+            decoder_ms: timings.decoder_ms,
+            joiner_ms: timings.joiner_ms,
+            total_ms: timings.total_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StreamingProcessResult {
+    pub partial_text: Option<String>,
+    pub chunks_processed: usize,
+    pub metrics: Vec<StreamingMetrics>,
+}
+
+enum IncrementalChunkResult {
+    Processed {
+        partial_text: Option<String>,
+        metrics: StreamingMetrics,
+    },
+    NoChunkReady,
+}
 
 /// Streaming transcription state
 /// Holds all LSTM cache state needed between inference calls
@@ -32,7 +107,7 @@ pub struct StreamingState {
     pub decoder_output: Vec<f32>,
     /// Accumulated tokens from all chunks
     pub tokens: Vec<i64>,
-    /// Number of chunks processed (chunk 0 is warmup)
+    /// Number of chunks processed
     pub chunk_count: usize,
     /// Samples already processed from audio buffer (in source sample rate)
     pub processed_samples: usize,
@@ -99,8 +174,8 @@ impl StreamingState {
             cache_time_dims[3],
         ]));
 
-        // Initialize decoder output with BOS token
-        match initialize_decoder_output(engine) {
+        // Initialize decoder output with the model's blank token.
+        match initialize_decoder_output(engine, blank_id) {
             Ok((dim, output, h, c)) => Some(Self {
                 cache_channel,
                 cache_time,
@@ -158,7 +233,7 @@ impl StreamingState {
         self.processed_samples = 0;
 
         // Re-initialize decoder output
-        if let Ok((_, output, h, c)) = initialize_decoder_output(engine) {
+        if let Ok((_, output, h, c)) = initialize_decoder_output(engine, self.blank_id) {
             self.decoder_output = output;
             self.decoder_h_state = h;
             self.decoder_c_state = c;
@@ -166,9 +241,10 @@ impl StreamingState {
     }
 }
 
-/// Initialize decoder with BOS token and return initial state
+/// Initialize decoder with the blank token and return initial state
 fn initialize_decoder_output(
     engine: &mut SttEngine,
+    blank_id: i32,
 ) -> Result<(usize, Vec<f32>, ArrayD<f32>, ArrayD<f32>), SttError> {
     let decoder = engine
         .get_decoder_session_mut()
@@ -178,8 +254,7 @@ fn initialize_decoder_output(
     let mut decoder_h_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim]));
     let mut decoder_c_state = ArrayD::<f32>::zeros(IxDyn(&[2, 1, decoder_hidden_dim]));
 
-    let bos_token = 0i32;
-    let init_targets = Array2::<i32>::from_elem((1, 1), bos_token);
+    let init_targets = Array2::<i32>::from_elem((1, 1), blank_id);
     let init_target_length = Array1::<i32>::from_elem(1, 1);
 
     let init_targets_tensor = TensorRef::from_array_view(init_targets.view())
@@ -230,41 +305,85 @@ fn initialize_decoder_output(
     Ok((dim, output, decoder_h_state, decoder_c_state))
 }
 
-/// Process a chunk of new audio and return partial transcription if tokens emitted
-///
-/// This function is designed to be called periodically (e.g., every 500ms) to process
-/// any new audio that has accumulated in the buffer since the last call.
-pub fn process_incremental(
+/// Process all currently available chunks and return text plus privacy-safe metrics.
+pub fn process_incremental_with_metrics(
     state: &mut StreamingState,
     audio_buffer: &Arc<Mutex<Vec<f32>>>,
     engine: &mut SttEngine,
-) -> Result<Option<String>, SttError> {
+) -> Result<StreamingProcessResult, SttError> {
+    let mut result = StreamingProcessResult::default();
+
+    for _ in 0..MAX_CHUNKS_PER_INCREMENTAL_CALL {
+        match process_one_chunk(state, audio_buffer, engine)? {
+            IncrementalChunkResult::Processed {
+                partial_text,
+                metrics,
+            } => {
+                result.chunks_processed += 1;
+                if partial_text.is_some() {
+                    result.partial_text = partial_text;
+                }
+                result.metrics.push(metrics);
+            }
+            IncrementalChunkResult::NoChunkReady => break,
+        }
+    }
+
+    if result.chunks_processed == MAX_CHUNKS_PER_INCREMENTAL_CALL {
+        crate::log_warn!(
+            "streaming",
+            "Reached streaming chunk processing limit; backlog may remain"
+        );
+    }
+
+    Ok(result)
+}
+
+fn process_one_chunk(
+    state: &mut StreamingState,
+    audio_buffer: &Arc<Mutex<Vec<f32>>>,
+    engine: &mut SttEngine,
+) -> Result<IncrementalChunkResult, SttError> {
+    let total_start = Instant::now();
+    let mut timings = StreamingStageTimings::default();
+
     // Try to lock the audio buffer without blocking
     let buffer = match audio_buffer.try_lock() {
         Ok(b) => b,
         Err(_) => {
             crate::log_debug!("streaming", "Buffer busy, skipping iteration");
-            return Ok(None);
+            return Ok(IncrementalChunkResult::NoChunkReady);
         }
     };
 
     let total_samples = buffer.len();
-    let new_samples = total_samples.saturating_sub(state.processed_samples);
 
-    // Calculate chunk size accounting for sample rate difference
-    // chunk_samples is in target 16kHz rate, we need to calculate equivalent in source rate
-    let chunk_samples_source =
-        chunk_samples_for_source_rate(state.metadata.window_size, state.source_sample_rate);
+    // Calculate shift accounting for sample rate difference.
+    let chunk_shift_samples_source =
+        chunk_samples_for_source_rate(state.metadata.chunk_shift.max(1), state.source_sample_rate);
 
     // Check if we have enough new samples for a chunk (in source sample rate)
-    if new_samples < chunk_samples_source {
-        return Ok(None);
+    if pending_chunk_count(
+        total_samples,
+        state.processed_samples,
+        state.metadata.window_size,
+        state.metadata.chunk_shift,
+        state.source_sample_rate,
+    ) == 0
+    {
+        return Ok(IncrementalChunkResult::NoChunkReady);
     }
 
-    // Extract new audio for processing (in source sample rate)
-    let audio_slice_source = &buffer[state.processed_samples..];
+    let chunk_window_samples_source =
+        source_samples_for_mel_frames(state.metadata.window_size, state.source_sample_rate);
+    let chunk_end_sample =
+        (state.processed_samples + chunk_window_samples_source).min(total_samples);
+
+    // Extract only the current chunk window instead of recomputing features for the full backlog.
+    let audio_slice_source = &buffer[state.processed_samples..chunk_end_sample];
 
     // Resample to 16kHz if needed
+    let feature_start = Instant::now();
     let audio_slice: std::borrow::Cow<[f32]> = if state.source_sample_rate != SAMPLE_RATE {
         std::borrow::Cow::Owned(resample_linear(
             audio_slice_source,
@@ -278,9 +397,10 @@ pub fn process_incremental(
     // Compute mel spectrogram for new audio (now at 16kHz)
     let mel_spec = compute_mel_spectrogram(&audio_slice, &state.mel_filterbank);
     let total_frames = mel_spec.shape()[1];
+    timings.feature_ms = elapsed_ms(feature_start);
 
     if total_frames < state.metadata.window_size {
-        return Ok(None);
+        return Ok(IncrementalChunkResult::NoChunkReady);
     }
 
     // Track tokens before processing to detect new emissions
@@ -321,6 +441,7 @@ pub fn process_incremental(
         let cache_len_tensor = TensorRef::from_array_view(cache_len.view())
             .map_err(|e| SttError::InferenceFailed(format!("cache_len tensor: {}", e)))?;
 
+        let encoder_start = Instant::now();
         let encoder_outputs = encoder
             .run(ort::inputs![
                 "audio_signal" => mel_tensor,
@@ -330,6 +451,7 @@ pub fn process_incremental(
                 "cache_last_channel_len" => cache_len_tensor
             ])
             .map_err(|e| SttError::InferenceFailed(format!("Encoder chunk failed: {}", e)))?;
+        timings.encoder_ms += elapsed_ms(encoder_start);
 
         // Extract encoder output to owned
         let enc_out = encoder_outputs
@@ -383,8 +505,7 @@ pub fn process_incremental(
     };
     // encoder borrow is now released
 
-    // Skip decoding for chunk 0 (warmup - cache not populated)
-    if state.chunk_count > 0 && time_frames > 0 {
+    if time_frames > 0 {
         let max_tokens = 500;
         let max_symbols_per_step = 10;
 
@@ -422,12 +543,14 @@ pub fn process_incremental(
                     let dec_tensor = TensorRef::from_array_view(dec_frame.view())
                         .map_err(|e| SttError::InferenceFailed(format!("dec_tensor: {}", e)))?;
 
+                    let joiner_start = Instant::now();
                     let joiner_outputs = joiner
                         .run(ort::inputs![
                             "encoder_outputs" => enc_tensor,
                             "decoder_outputs" => dec_tensor
                         ])
                         .map_err(|e| SttError::InferenceFailed(format!("Joiner failed: {}", e)))?;
+                    timings.joiner_ms += elapsed_ms(joiner_start);
 
                     // Extract logits and find argmax
                     let logits = joiner_outputs
@@ -438,15 +561,9 @@ pub fn process_incremental(
                         SttError::InferenceFailed(format!("Failed to extract logits: {}", e))
                     })?;
 
-                    let mut indexed: Vec<(usize, f32)> = logits_data
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &v)| (i, v))
-                        .collect();
-                    indexed
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                    indexed[0].0 as i64
+                    argmax_index(logits_data).ok_or_else(|| {
+                        SttError::InferenceFailed("Empty joiner logits".to_string())
+                    })? as i64
                 };
                 // joiner borrow released here
 
@@ -479,6 +596,7 @@ pub fn process_incremental(
                     let c_tensor = TensorRef::from_array_view(state.decoder_c_state.view())
                         .map_err(|e| SttError::InferenceFailed(format!("c_state: {}", e)))?;
 
+                    let decoder_start = Instant::now();
                     let decoder_outputs = decoder
                         .run(ort::inputs![
                             "targets" => new_targets_tensor,
@@ -489,6 +607,7 @@ pub fn process_incremental(
                         .map_err(|e| {
                             SttError::InferenceFailed(format!("Decoder update failed: {}", e))
                         })?;
+                    timings.decoder_ms += elapsed_ms(decoder_start);
 
                     // Update cached decoder output
                     if let Some(dec_out) = decoder_outputs.get("outputs") {
@@ -526,15 +645,32 @@ pub fn process_incremental(
     state.cache_len = new_cache_len;
 
     // Update processed samples count (in source sample rate)
-    state.processed_samples += chunk_samples_source;
+    state.processed_samples =
+        (state.processed_samples + chunk_shift_samples_source).min(total_samples);
     state.chunk_count += 1;
+    timings.total_ms = elapsed_ms(total_start);
 
-    // Return partial text if new tokens were emitted
-    if state.tokens.len() > tokens_before {
-        Ok(Some(state.get_partial_text()))
+    let current_text = state.get_partial_text();
+    let partial_text = if state.tokens.len() > tokens_before {
+        Some(current_text.clone())
     } else {
-        Ok(None)
-    }
+        None
+    };
+    let metrics = StreamingMetrics::new(
+        state.chunk_count.saturating_sub(1),
+        total_samples,
+        state.processed_samples,
+        state.source_sample_rate,
+        tokens_before,
+        state.tokens.len(),
+        current_text.chars().count(),
+        timings,
+    );
+
+    Ok(IncrementalChunkResult::Processed {
+        partial_text,
+        metrics,
+    })
 }
 
 /// Find token ID in vocabulary
@@ -550,6 +686,63 @@ fn chunk_samples_for_source_rate(window_size: usize, source_sample_rate: u32) ->
     } else {
         chunk_samples_16k
     }
+}
+
+fn pending_chunk_count(
+    total_samples: usize,
+    processed_samples: usize,
+    window_size: usize,
+    chunk_shift: usize,
+    source_sample_rate: u32,
+) -> usize {
+    let window_samples = source_samples_for_mel_frames(window_size, source_sample_rate);
+    let shift_samples = chunk_samples_for_source_rate(chunk_shift.max(1), source_sample_rate);
+    let available_samples = total_samples.saturating_sub(processed_samples);
+
+    if available_samples < window_samples {
+        0
+    } else {
+        ((available_samples - window_samples) / shift_samples) + 1
+    }
+}
+
+fn source_samples_for_mel_frames(frame_count: usize, source_sample_rate: u32) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+
+    let samples_16k = WIN_LENGTH + HOP_LENGTH * frame_count.saturating_sub(1);
+    if source_sample_rate != SAMPLE_RATE {
+        (samples_16k as f64 * source_sample_rate as f64 / SAMPLE_RATE as f64).ceil() as usize
+    } else {
+        samples_16k
+    }
+}
+
+fn samples_to_ms(samples: usize, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+
+    ((samples as f64 / sample_rate as f64) * 1000.0).round() as u64
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn argmax_index(values: &[f32]) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+
+    for (idx, &value) in values.iter().enumerate() {
+        match best {
+            None => best = Some((idx, value)),
+            Some((_, best_value)) if value > best_value => best = Some((idx, value)),
+            _ => {}
+        }
+    }
+
+    best.map(|(idx, _)| idx)
 }
 
 /// Decode tokens to text (simplified version from stt.rs)
@@ -585,7 +778,6 @@ fn compute_mel_spectrogram(audio: &[f32], mel_filterbank: &Array2<f32>) -> Array
     use rustfft::{num_complex::Complex, FftPlanner};
 
     const N_FFT: usize = 512;
-    const WIN_LENGTH: usize = 400;
 
     let n_mels = mel_filterbank.shape()[0];
     if audio.len() < WIN_LENGTH {
@@ -696,6 +888,55 @@ mod tests {
         assert_eq!(chunk_samples_for_source_rate(112, SAMPLE_RATE), 17_920);
         assert_eq!(chunk_samples_for_source_rate(112, 48_000), 53_760);
         assert_eq!(chunk_samples_for_source_rate(112, 44_100), 49_392);
+    }
+
+    #[test]
+    fn test_source_samples_for_mel_frames_include_window_length() {
+        assert_eq!(source_samples_for_mel_frames(0, SAMPLE_RATE), 0);
+        assert_eq!(source_samples_for_mel_frames(1, SAMPLE_RATE), 400);
+        assert_eq!(source_samples_for_mel_frames(4, SAMPLE_RATE), 880);
+        assert_eq!(source_samples_for_mel_frames(4, 48_000), 2_640);
+    }
+
+    #[test]
+    fn test_pending_chunk_count_uses_window_and_shift() {
+        assert_eq!(pending_chunk_count(879, 0, 4, 2, SAMPLE_RATE), 0);
+        assert_eq!(pending_chunk_count(880, 0, 4, 2, SAMPLE_RATE), 1);
+        assert_eq!(pending_chunk_count(1_200, 0, 4, 2, SAMPLE_RATE), 2);
+        assert_eq!(pending_chunk_count(1_520, 0, 4, 2, SAMPLE_RATE), 3);
+    }
+
+    #[test]
+    fn test_streaming_metrics_are_privacy_safe_and_track_backlog() {
+        let metrics = StreamingMetrics::new(
+            7,
+            48_000,
+            24_000,
+            48_000,
+            2,
+            12,
+            31,
+            StreamingStageTimings::default(),
+        );
+
+        assert_eq!(metrics.chunk_index, 7);
+        assert_eq!(metrics.available_audio_ms, 1_000);
+        assert_eq!(metrics.processed_audio_ms, 500);
+        assert_eq!(metrics.backlog_ms, 500);
+        assert_eq!(metrics.tokens_emitted, 10);
+        assert_eq!(metrics.partial_chars, 31);
+
+        let serialized = serde_json::to_string(&metrics).unwrap();
+        assert!(!serialized.contains("transcript"));
+        assert!(!serialized.contains("text"));
+    }
+
+    #[test]
+    fn test_argmax_index_returns_first_maximum_without_sorting() {
+        let logits = [-4.0, 1.5, 3.2, 3.2, -1.0];
+
+        assert_eq!(argmax_index(&logits), Some(2));
+        assert_eq!(argmax_index(&[]), None);
     }
 
     #[test]

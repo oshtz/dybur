@@ -56,7 +56,7 @@ export const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
  * Current tray app version to download
  * Update this when releasing new versions
  */
-export const TRAY_APP_VERSION = 'v1.2.1';
+export const TRAY_APP_VERSION = 'v1.2.4';
 
 /**
  * Get the expected asset name for the current platform

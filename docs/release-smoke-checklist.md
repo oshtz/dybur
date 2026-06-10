@@ -102,20 +102,15 @@ pnpm eval:asr:manifest benchmarks/asr/<run>.json --config benchmarks/asr/corpus-
 pnpm eval:asr:candidates --commands benchmarks/asr/candidate-commands.local.json --preflight
 ```
 
-4. Run, score, and gate candidates:
+4. Run the readiness gate for the exact baseline and candidate pair:
 
 ```sh
-pnpm eval:asr:candidates benchmarks/asr/<run>.json \
+pnpm eval:asr:runtime-ready benchmarks/asr/<run>.json \
   --commands benchmarks/asr/candidate-commands.local.json \
-  --output benchmarks/asr/candidate-runs.json
-
-pnpm eval:asr benchmarks/asr/candidate-runs.json \
-  --format json \
-  --output benchmarks/asr/candidate-report.json \
-  --strict
-
-pnpm eval:asr:gate benchmarks/asr/candidate-report.json \
-  --config benchmarks/asr/gates/candidate-promotion.example.json
+  --baseline parakeet-tdt-v3-int8 \
+  --candidate nemotron-35-asr-streaming-onnx-int4 \
+  --gate-config benchmarks/asr/gates/candidate-promotion.example.json \
+  --output-dir benchmarks/asr/runtime-readiness/promotion
 ```
 
 Keep CoreML Parakeet as the preferred Apple Silicon spike until it has a clean

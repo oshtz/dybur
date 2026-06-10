@@ -96,6 +96,8 @@ pub struct ModelDefinition {
     pub languages: &'static [&'static str],
     /// Whether this is the default model
     pub is_default: bool,
+    /// Whether this is a legacy model kept for explicit compatibility/benchmark use
+    pub is_legacy: bool,
     /// Model-specific configuration
     pub config: ModelConfig,
 }
@@ -257,6 +259,7 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
         size_bytes: 661_000_000,
         languages: &["en"],
         is_default: false,
+        is_legacy: true,
         config: ModelConfig {
             vocab_type: VocabType::TextFile,
             sample_rate: 16000,
@@ -278,6 +281,7 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
             "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "uk", "ja", "ko", "zh",
         ],
         is_default: true,
+        is_legacy: false,
         config: ModelConfig {
             vocab_type: VocabType::TextFile,
             sample_rate: 16000,
@@ -297,6 +301,7 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
         size_bytes: 663_000_000,
         languages: &["en"],
         is_default: false,
+        is_legacy: false,
         config: ModelConfig {
             vocab_type: VocabType::TextFile,
             sample_rate: 16000,
@@ -316,6 +321,7 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
         size_bytes: 1_100_000_000,
         languages: &[], // All languages
         is_default: false,
+        is_legacy: false,
         config: ModelConfig {
             vocab_type: VocabType::Bpe,
             sample_rate: 16000,
@@ -335,6 +341,7 @@ pub const MODEL_REGISTRY: &[ModelDefinition] = &[
         size_bytes: 1_600_000_000,
         languages: &[],
         is_default: false,
+        is_legacy: false,
         config: ModelConfig {
             vocab_type: VocabType::Bpe,
             sample_rate: 16000,
@@ -358,9 +365,12 @@ pub fn get_default_model() -> &'static ModelDefinition {
         .expect("No default model defined")
 }
 
-/// Get all available model definitions
-pub fn get_available_models() -> &'static [ModelDefinition] {
+/// Get model definitions for normal picker/download flows.
+pub fn get_available_models() -> Vec<&'static ModelDefinition> {
     MODEL_REGISTRY
+        .iter()
+        .filter(|model| !model.is_legacy)
+        .collect()
 }
 
 // ============================================================================
@@ -1045,4 +1055,22 @@ pub fn get_model_file_path(model_id: &str, role: FileRole) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parakeet_v2_is_legacy_but_still_explicitly_known() {
+        let legacy = get_model_definition("parakeet-tdt-v2-int8").unwrap();
+        let available_ids: Vec<&str> = get_available_models()
+            .iter()
+            .map(|model| model.id)
+            .collect();
+
+        assert!(legacy.is_legacy);
+        assert!(!available_ids.contains(&"parakeet-tdt-v2-int8"));
+        assert!(available_ids.contains(&"parakeet-tdt-v3-int8"));
+    }
 }

@@ -14,6 +14,7 @@ export {
   buildDownloadUrl,
   type ModelArchitecture,
   type VocabType,
+  type ModelVisibility,
   type FileRole,
   type ModelFile,
   type ModelConfig,

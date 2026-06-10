@@ -9,10 +9,11 @@
 export type CandidateRuntime =
   | 'coreml'
   | 'mlx'
+  | 'nemo'
+  | 'onnxruntime_genai'
   | 'python_transformers'
   | 'python_mlx'
-  | 'vllm'
-  | 'nemo';
+  | 'vllm';
 
 export type CandidateRecommendation = 'recommended' | 'benchmark' | 'defer';
 
@@ -52,6 +53,27 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     nextStep:
       'Prototype a macOS adapter that invokes the CoreML package, then compare WER and latency against parakeet-tdt-v3-int8.',
     benchmarkHint: 'node scripts/asr-candidates/fluidaudio-coreml.js "{audio}"',
+  },
+  {
+    id: 'nemotron-35-asr-streaming-onnx-int4',
+    displayName: 'Nemotron 3.5 ASR Streaming ONNX INT4',
+    provider: 'ONNX Community / NVIDIA',
+    sourceUrl:
+      'https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4',
+    runtime: 'onnxruntime_genai',
+    platforms: ['darwin-arm64', 'windows-x64', 'linux-x64'],
+    license: 'MIT',
+    sizeLabel: '~0.67 GB INT4 ONNX',
+    languageLabel: '40 language-locales; English transcription-ready',
+    recommendation: 'recommended',
+    rationale:
+      'Best current spike for dybur live dictation: newer cache-aware Nemotron 3.5 streaming model, ONNX/int4 packaging, configurable low-latency chunking, punctuation, and capitalization.',
+    integrationRisk:
+      'The ONNX INT4 export uses an ONNX Runtime GenAI-style package rather than dybur\'s current sherpa encoder/decoder/joiner session layout, so it needs a runtime adapter before becoming a production model ID.',
+    nextStep:
+      'Benchmark with the candidate runner using the ONNX Runtime GenAI wrapper, then prototype a native ONNX Runtime GenAI adapter if WER and latency beat the current Nemotron export.',
+    benchmarkHint:
+      'python scripts/asr-candidates/nemotron35-ortgenai.py "{audio}" --model onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4',
   },
   {
     id: 'parakeet-tdt-v3-mlx',

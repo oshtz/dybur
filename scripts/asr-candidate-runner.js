@@ -18,7 +18,7 @@ function usage() {
   console.log(`Usage: node scripts/asr-candidate-runner.js [manifest.json] --commands <commands.json> --output <runs.json> [options]
 
 Options:
-  --model <id>         Run only one candidate model
+  --model <id>         Run only a candidate model; repeat to run an exact model set
   --dry-run            Print commands without executing them
   --preflight          Run command setup checks without audio samples
   --timeout-ms <ms>    Per-sample timeout (default: 180000)
@@ -32,6 +32,7 @@ Commands file:
     {
       "model": "parakeet-tdt-v3-mlx",
       "command": "parakeet-mlx \\"{audio}\\" --model mlx-community/parakeet-tdt-0.6b-v3",
+      "batchCommand": "parakeet-mlx-batch \\"{manifest}\\" --output \\"{output}\\"",
       "checkCommand": "parakeet-mlx --help",
       "disabled": false
     }
@@ -45,7 +46,7 @@ function parseArgs(argv) {
   const options = {
     commandsPath: null,
     outputPath: null,
-    model: null,
+    models: [],
     dryRun: false,
     preflight: false,
     timeoutMs: 180_000,
@@ -61,7 +62,7 @@ function parseArgs(argv) {
         options.outputPath = args.shift() ?? null;
         break;
       case '--model':
-        options.model = args.shift() ?? null;
+        options.models.push(args.shift() ?? '');
         break;
       case '--dry-run':
         options.dryRun = true;
@@ -101,6 +102,8 @@ function parseArgs(argv) {
     throw new Error('--timeout-ms must be a positive number');
   }
 
+  options.models = [...new Set(options.models.filter(Boolean))];
+
   return { manifestPath, options };
 }
 
@@ -124,8 +127,14 @@ function validateCommands(commandsFile) {
     throw new Error('Commands file must include commands[]');
   }
   for (const command of commandsFile.commands) {
-    if (!command.model || !command.command) {
-      throw new Error('Each command must include model and command');
+    if (!command.model || (!command.command && !command.batchCommand)) {
+      throw new Error('Each command must include model and command or batchCommand');
+    }
+    if (command.command != null && typeof command.command !== 'string') {
+      throw new Error(`command must be a string for model ${command.model}`);
+    }
+    if (command.batchCommand != null && typeof command.batchCommand !== 'string') {
+      throw new Error(`batchCommand must be a string for model ${command.model}`);
     }
     if (command.checkCommand != null && typeof command.checkCommand !== 'string') {
       throw new Error(`checkCommand must be a string for model ${command.model}`);
@@ -143,6 +152,20 @@ function buildCommand(template, sample, audioPath) {
     .replaceAll('{sampleId}', String(sample.id))
     .replaceAll('{reference}', String(sample.reference))
     .replaceAll('{durationMs}', String(sample.durationMs ?? ''));
+}
+
+function buildBatchCommand(template, manifestPath, outputPath) {
+  return template.replaceAll('{manifest}', manifestPath).replaceAll('{output}', outputPath);
+}
+
+function sanitizeFileStem(value) {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'asr-model';
+}
+
+function buildBatchOutputPath(outputPath, model) {
+  const ext = path.extname(outputPath);
+  const stem = path.basename(outputPath, ext);
+  return path.join(path.dirname(outputPath), `${stem}.${sanitizeFileStem(model)}.batch.json`);
 }
 
 function getJsonPathValue(value, jsonPath) {
@@ -225,11 +248,86 @@ function readGitHead() {
   return result.stdout.trim() || null;
 }
 
+function parseBatchOutput(filePath) {
+  const parsed = readJson(filePath);
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+  if (Array.isArray(parsed.runs)) {
+    return parsed.runs;
+  }
+  throw new Error(`Batch output must be an array or include runs[]: ${filePath}`);
+}
+
+function normalizeBatchRuns({
+  batchCommand,
+  batchOutputPath,
+  commandConfig,
+  completedAt,
+  manifest,
+  startedAt,
+  stderr,
+}) {
+  const sampleIds = new Set(manifest.samples.map((sample) => sample.id));
+  const seenSampleIds = new Set();
+  const batchRuns = parseBatchOutput(batchOutputPath);
+  const runs = [];
+
+  for (const run of batchRuns) {
+    if (!run || typeof run !== 'object') {
+      throw new Error(`Batch command ${commandConfig.model} produced a malformed run`);
+    }
+    if (!run.sampleId || typeof run.hypothesis !== 'string') {
+      throw new Error(
+        `Batch command ${commandConfig.model} must produce sampleId and hypothesis for each run`
+      );
+    }
+    if (!sampleIds.has(run.sampleId)) {
+      throw new Error(
+        `Batch command ${commandConfig.model} produced unknown sample id: ${run.sampleId}`
+      );
+    }
+    if (seenSampleIds.has(run.sampleId)) {
+      throw new Error(
+        `Batch command ${commandConfig.model} produced duplicate sample id: ${run.sampleId}`
+      );
+    }
+    if (!Number.isFinite(run.latencyMs)) {
+      throw new Error(
+        `Batch command ${commandConfig.model} must produce numeric latencyMs for ${run.sampleId}`
+      );
+    }
+    seenSampleIds.add(run.sampleId);
+    runs.push({
+      model: commandConfig.model,
+      sampleId: run.sampleId,
+      hypothesis: run.hypothesis.trim(),
+      latencyMs: run.latencyMs,
+      command: batchCommand,
+      batchOutputPath,
+      startedAt,
+      completedAt,
+      stderr: stderr.trim() || undefined,
+    });
+  }
+
+  const missingSampleIds = [...sampleIds].filter((sampleId) => !seenSampleIds.has(sampleId));
+  if (missingSampleIds.length > 0) {
+    throw new Error(
+      `Batch command ${commandConfig.model} did not produce runs for sample(s): ${missingSampleIds.join(
+        ', '
+      )}`
+    );
+  }
+
+  return runs;
+}
+
 function buildMetadata({
   commands,
   commandsPath,
   manifestPath,
-  model,
+  models,
   outputPath,
   startedAt,
   timeoutMs,
@@ -247,11 +345,13 @@ function buildMetadata({
     manifestPath,
     commandsPath,
     outputPath,
-    selectedModel: model,
+    selectedModel: models.length === 1 ? models[0] : null,
+    selectedModels: models,
     timeoutMs,
     commandCount: commands.length,
     commands: commands.map((command) => ({
       model: command.model,
+      batchCommand: command.batchCommand ?? null,
       checkCommand: command.checkCommand ?? null,
       outputJsonPath: command.outputJsonPath ?? null,
       disabled: Boolean(command.disabled),
@@ -297,12 +397,26 @@ async function main() {
 
   validateCommands(commandsFile);
 
+  const selectedModels = new Set(options.models);
   const matchingCommands = commandsFile.commands.filter(
-    (command) => !options.model || command.model === options.model
+    (command) => selectedModels.size === 0 || selectedModels.has(command.model)
   );
   if (matchingCommands.length === 0) {
     throw new Error(
-      options.model ? `No command found for model: ${options.model}` : 'No commands found'
+      options.models.length === 1
+        ? `No command found for model: ${options.models[0]}`
+        : options.models.length > 1
+          ? `No command found for model(s): ${options.models.join(', ')}`
+          : 'No commands found'
+    );
+  }
+  const foundModels = new Set(matchingCommands.map((command) => command.model));
+  const missingModels = options.models.filter((model) => !foundModels.has(model));
+  if (missingModels.length > 0) {
+    throw new Error(
+      missingModels.length === 1
+        ? `No command found for model: ${missingModels[0]}`
+        : `No command found for model(s): ${missingModels.join(', ')}`
     );
   }
 
@@ -331,10 +445,46 @@ async function main() {
     throw new Error(`No enabled commands found${disabledReasons ? `\n${disabledReasons}` : ''}`);
   }
 
+  const resolvedOutput = path.resolve(options.outputPath);
   const planned = [];
   const runs = [];
 
   for (const commandConfig of commands) {
+    if (commandConfig.batchCommand) {
+      const batchOutputPath = buildBatchOutputPath(resolvedOutput, commandConfig.model);
+      const command = buildBatchCommand(commandConfig.batchCommand, resolvedManifest, batchOutputPath);
+      planned.push({
+        model: commandConfig.model,
+        command,
+        disabled: Boolean(commandConfig.disabled),
+        disabledReason: commandConfig.disabledReason,
+        batch: true,
+      });
+
+      if (options.dryRun) {
+        continue;
+      }
+
+      fs.mkdirSync(path.dirname(batchOutputPath), { recursive: true });
+      const runStartedAt = new Date().toISOString();
+      const { stderr } = await runCommand(command, options.timeoutMs);
+      if (!fs.existsSync(batchOutputPath)) {
+        throw new Error(`Batch command did not create output file: ${batchOutputPath}`);
+      }
+      runs.push(
+        ...normalizeBatchRuns({
+          batchCommand: command,
+          batchOutputPath,
+          commandConfig,
+          completedAt: new Date().toISOString(),
+          manifest,
+          startedAt: runStartedAt,
+          stderr,
+        })
+      );
+      continue;
+    }
+
     for (const sample of manifest.samples) {
       const audioPath = resolveSampleAudio(sample, manifestDir);
       const command = buildCommand(commandConfig.command, sample, audioPath);
@@ -377,18 +527,18 @@ async function main() {
     for (const item of planned) {
       const prefix = item.disabled ? '[disabled] ' : '';
       const suffix = item.disabledReason ? ` (${item.disabledReason})` : '';
-      console.log(`${prefix}${item.model} ${item.sampleId}: ${item.command}${suffix}`);
+      const target = item.batch ? 'batch' : item.sampleId;
+      console.log(`${prefix}${item.model} ${target}: ${item.command}${suffix}`);
     }
     return;
   }
 
-  const resolvedOutput = path.resolve(options.outputPath);
   const output = {
     metadata: buildMetadata({
       commands,
       commandsPath: resolvedCommands,
       manifestPath: resolvedManifest,
-      model: options.model,
+      models: options.models,
       outputPath: resolvedOutput,
       startedAt,
       timeoutMs: options.timeoutMs,

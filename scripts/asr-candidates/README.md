@@ -8,6 +8,92 @@ model IDs yet. Each wrapper prints a transcript to stdout so
 Use isolated Python environments. Do not install these dependencies into the app
 workspace unless you intentionally want local benchmark tooling there.
 
+## Parakeet TDT v3 ONNX Baseline
+
+This is the benchmark path for dybur's installed production baseline,
+`parakeet-tdt-v3-int8`. It loads the model files from
+`~/.dybur/models/parakeet-tdt-v3-int8` by default, so it measures the same local
+ONNX artifacts that the desktop app installs.
+
+```bash
+python -m venv .venv-asr
+. .venv-asr/bin/activate
+pip install -U onnxruntime soundfile librosa
+python scripts/asr-candidates/parakeet-tdt-onnx.py --preflight
+python scripts/asr-candidates/parakeet-tdt-onnx.py samples/example.wav
+```
+
+On Windows PowerShell, activate with:
+
+```powershell
+.venv-asr\Scripts\Activate.ps1
+```
+
+Use this wrapper as the baseline command when running readiness gates that
+compare experimental candidates against `parakeet-tdt-v3-int8`.
+
+The same wrapper can target `parakeet-tdt-v2-int8` with `--model-id` for legacy
+benchmark control runs. v2 is no longer a normal app/CLI picker option.
+
+## Installed Nemotron Streaming INT8
+
+This is the benchmark path for dybur's installed production
+`nemotron-streaming-int8` model. It mirrors the app's sherpa-style streaming
+transducer shape: encoder cache tensors, decoder state tensors, joiner logits,
+and greedy token emission.
+
+```bash
+python scripts/asr-candidates/nemotron-streaming-onnx.py --preflight
+python scripts/asr-candidates/nemotron-streaming-onnx.py samples/example.wav
+```
+
+Use this to compare the older installed streaming model against Parakeet and
+newer streaming candidates on the same fixed corpus.
+
+## Installed Whisper Large v3 Turbo ONNX
+
+This is the benchmark path for dybur's installed
+`whisper-large-v3-turbo-int8` and `whisper-large-v3-turbo-fp16` models. The
+wrapper uses the local ONNX encoder/decoder with the local tokenizer/config.
+
+```bash
+python scripts/asr-candidates/whisper-onnx.py --preflight --model-id whisper-large-v3-turbo-int8
+python scripts/asr-candidates/whisper-onnx.py samples/example.wav --model-id whisper-large-v3-turbo-int8
+```
+
+The current FP16 export fails ORT CPU graph initialization with default
+optimizations, so benchmark it with:
+
+```bash
+python scripts/asr-candidates/whisper-onnx.py --preflight --model-id whisper-large-v3-turbo-fp16 --disable-optimizations
+python scripts/asr-candidates/whisper-onnx.py samples/example.wav --model-id whisper-large-v3-turbo-fp16 --disable-optimizations
+```
+
+## Nemotron 3.5 ASR ONNX INT4
+
+This is the benchmark path for
+`onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4`. It is a candidate
+for dybur's next live streaming backend, but it is not compatible with the
+current production sherpa-style encoder/decoder/joiner runtime without an
+adapter.
+
+```bash
+python -m venv .venv-nemotron35
+. .venv-nemotron35/bin/activate
+pip install -U onnxruntime-genai huggingface_hub soundfile librosa
+python scripts/asr-candidates/nemotron35-ortgenai.py --preflight
+python scripts/asr-candidates/nemotron35-ortgenai.py samples/example.wav
+```
+
+On Windows PowerShell, activate with:
+
+```powershell
+.venv-nemotron35\Scripts\Activate.ps1
+```
+
+Keep this wrapper as benchmark-only until dybur has a native ONNX Runtime GenAI
+adapter or a sherpa-compatible export with the same quality and latency.
+
 ## Qwen3-ASR 0.6B
 
 Qwen recommends the `qwen-asr` Python package and Python 3.12.
@@ -78,6 +164,12 @@ pnpm eval:asr:candidates --commands benchmarks/asr/candidate-commands.local.json
 Preflight mode runs enabled commands' optional `checkCommand` values without
 audio. Disabled commands print their setup reason instead of failing.
 
+Command entries may include both `command` and `batchCommand`. The per-sample
+`command` path is useful for simple wrapper smoke tests. The `batchCommand` path
+is preferred for promotion readiness because it loads the model once for the
+manifest and reports warmed per-sample `latencyMs` values through the generated
+batch JSON output.
+
 ```bash
 pnpm eval:asr:candidates benchmarks/asr/<run>.json \
   --commands benchmarks/asr/candidate-commands.local.json \
@@ -96,6 +188,36 @@ pnpm eval:asr:gate benchmarks/asr/candidate-report.json \
   --config benchmarks/asr/gates/candidate-promotion.example.json
 ```
 
+For promotion-readiness checks, prefer the orchestration script. It runs the
+command-file readiness check, manifest policy check, command preflight,
+candidate run, strict JSON scoring, and optional gate in sequence, then writes a
+`readiness-summary.json` next to the generated ASR outputs:
+
+```bash
+pnpm eval:asr:runtime-ready benchmarks/asr/<run>.json \
+  --commands benchmarks/asr/candidate-commands.local.json \
+  --model nemotron-35-asr-streaming-onnx-int4 \
+  --output-dir benchmarks/asr/runtime-readiness/nemotron35
+```
+
+Use `--dry-run` to inspect the plan without loading models. For regression
+checks, use `--baseline <model>` with one or more `--candidate <model>` flags
+and a gate config so preflight, corpus execution, and gating all use the same
+explicit model pair:
+
+```bash
+pnpm eval:asr:runtime-ready benchmarks/asr/<run>.json \
+  --commands benchmarks/asr/candidate-commands.local.json \
+  --baseline parakeet-tdt-v3-int8 \
+  --candidate nemotron-35-asr-streaming-onnx-int4 \
+  --gate-config benchmarks/asr/gates/candidate-promotion.example.json \
+  --output-dir benchmarks/asr/runtime-readiness/promotion
+```
+
+Non-dry readiness runs require every selected command to be enabled in a local
+command file; the checked-in example commands stay disabled until the matching
+benchmark runtime is installed.
+
 ## Wrapper Checks
 
 ```bash
@@ -105,4 +227,4 @@ pnpm test:scripts
 This covers the candidate runner's dry-run output, preflight behavior,
 disabled-command handling, JSON transcript extraction, generated ASR run
 manifests, ASR manifest validation, strict ASR scoring validation, ASR gate
-checks, and CLI candidate catalog smoke checks.
+checks, runtime-readiness orchestration, and CLI candidate catalog smoke checks.

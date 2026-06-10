@@ -1274,14 +1274,14 @@ impl SttEngine {
         let max_tokens = 500;
         let max_symbols_per_step = 10;
 
-        // Initialize decoder output ONCE with BOS token (token 0, not blank)
-        // Blank token (1024) is for joiner output only, not decoder input
-        // Token 0 (<unk>) often serves as BOS in SentencePiece vocabularies
-        let bos_token = 0i32;
+        // Initialize decoder output with the model's blank token. This export
+        // emits valid first-chunk text with a blank decoder seed; token 0
+        // biases the first emission toward <unk>-adjacent output.
+        let initial_token = blank_id;
         let (decoder_dim, mut current_dec_output) = {
             let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
 
-            let init_targets = Array2::<i32>::from_elem((1, 1), bos_token);
+            let init_targets = Array2::<i32>::from_elem((1, 1), initial_token);
             let init_target_length = Array1::<i32>::from_elem(1, 1);
             let init_targets_tensor = TensorRef::from_array_view(init_targets.view())
                 .map_err(|e| SttError::InferenceFailed(format!("init_targets: {}", e)))?;
@@ -1338,9 +1338,9 @@ impl SttEngine {
 
         crate::log_debug!(
             "model",
-            "Initial decoder output: {} dims (BOS token: {})",
+            "Initial decoder output: {} dims (seed token: {})",
             decoder_dim,
-            bos_token
+            initial_token
         );
 
         // Step 2: Process audio in chunks WITH STREAMING DECODE
@@ -1433,60 +1433,8 @@ impl SttEngine {
                 );
             }
 
-            // STREAMING DECODE: Process each encoder frame from this chunk immediately
             let decoder = self.decoder_session.as_mut().ok_or(SttError::NotLoaded)?;
             let joiner = self.joiner_session.as_mut().ok_or(SttError::NotLoaded)?;
-
-            // Skip decoding for chunk 0 - encoder cache isn't populated yet, output is unreliable
-            // We still processed chunk 0's encoder to populate the cache for subsequent chunks
-            if chunk_idx == 0 {
-                crate::log_debug!(
-                    "model",
-                    "Chunk 0: skipping decode (warmup), cache will be populated"
-                );
-                // Update encoder cache and continue to next chunk
-                let cache_channel_next = encoder_outputs
-                    .get("cache_last_channel_next")
-                    .ok_or_else(|| {
-                        SttError::InferenceFailed("No cache_last_channel_next".to_string())
-                    })?;
-                let (shape, data) =
-                    cache_channel_next
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| {
-                            SttError::InferenceFailed(format!("Failed to extract cache: {}", e))
-                        })?;
-                cache_channel =
-                    ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()).map_err(|e| {
-                        SttError::InferenceFailed(format!("Failed to reshape cache: {}", e))
-                    })?;
-
-                let cache_time_next =
-                    encoder_outputs.get("cache_last_time_next").ok_or_else(|| {
-                        SttError::InferenceFailed("No cache_last_time_next".to_string())
-                    })?;
-                let (shape, data) = cache_time_next.try_extract_tensor::<f32>().map_err(|e| {
-                    SttError::InferenceFailed(format!("Failed to extract cache: {}", e))
-                })?;
-                cache_time =
-                    ArrayD::from_shape_vec(shape.to_ixdyn(), data.to_vec()).map_err(|e| {
-                        SttError::InferenceFailed(format!("Failed to reshape cache: {}", e))
-                    })?;
-
-                let cache_len_next = encoder_outputs
-                    .get("cache_last_channel_next_len")
-                    .ok_or_else(|| {
-                        SttError::InferenceFailed("No cache_last_channel_next_len".to_string())
-                    })?;
-                let (_, len_data) = cache_len_next.try_extract_tensor::<i64>().map_err(|e| {
-                    SttError::InferenceFailed(format!("Failed to extract cache_len: {}", e))
-                })?;
-                cache_len_val = len_data[0];
-
-                offset += chunk_shift;
-                chunk_idx += 1;
-                continue;
-            }
 
             for t in 0..time_frames {
                 if all_tokens.len() >= max_tokens {

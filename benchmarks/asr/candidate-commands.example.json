@@ -1,6 +1,46 @@
 {
   "commands": [
     {
+      "model": "parakeet-tdt-v3-int8",
+      "command": "python scripts/asr-candidates/parakeet-tdt-onnx.py \"{audio}\" --model-id parakeet-tdt-v3-int8",
+      "batchCommand": "python scripts/asr-candidates/parakeet-tdt-onnx.py --manifest \"{manifest}\" --output \"{output}\" --model-id parakeet-tdt-v3-int8",
+      "checkCommand": "python scripts/asr-candidates/parakeet-tdt-onnx.py --preflight --model-id parakeet-tdt-v3-int8",
+      "disabled": true,
+      "disabledReason": "Requires dybur's Parakeet TDT v3 model installed under ~/.dybur/models plus ONNX Runtime, soundfile, and librosa in the benchmark Python environment."
+    },
+    {
+      "model": "parakeet-tdt-v2-int8",
+      "command": "python scripts/asr-candidates/parakeet-tdt-onnx.py \"{audio}\" --model-id parakeet-tdt-v2-int8",
+      "batchCommand": "python scripts/asr-candidates/parakeet-tdt-onnx.py --manifest \"{manifest}\" --output \"{output}\" --model-id parakeet-tdt-v2-int8",
+      "checkCommand": "python scripts/asr-candidates/parakeet-tdt-onnx.py --preflight --model-id parakeet-tdt-v2-int8",
+      "disabled": true,
+      "disabledReason": "Legacy benchmark control only. Requires dybur's Parakeet TDT v2 model installed under ~/.dybur/models plus ONNX Runtime, soundfile, and librosa in the benchmark Python environment."
+    },
+    {
+      "model": "nemotron-streaming-int8",
+      "command": "python scripts/asr-candidates/nemotron-streaming-onnx.py \"{audio}\" --model-id nemotron-streaming-int8",
+      "batchCommand": "python scripts/asr-candidates/nemotron-streaming-onnx.py --manifest \"{manifest}\" --output \"{output}\" --model-id nemotron-streaming-int8",
+      "checkCommand": "python scripts/asr-candidates/nemotron-streaming-onnx.py --preflight --model-id nemotron-streaming-int8",
+      "disabled": true,
+      "disabledReason": "Requires dybur's Nemotron streaming model installed under ~/.dybur/models plus ONNX Runtime, soundfile, and librosa in the benchmark Python environment."
+    },
+    {
+      "model": "whisper-large-v3-turbo-int8",
+      "command": "python scripts/asr-candidates/whisper-onnx.py \"{audio}\" --model-id whisper-large-v3-turbo-int8",
+      "batchCommand": "python scripts/asr-candidates/whisper-onnx.py --manifest \"{manifest}\" --output \"{output}\" --model-id whisper-large-v3-turbo-int8",
+      "checkCommand": "python scripts/asr-candidates/whisper-onnx.py --preflight --model-id whisper-large-v3-turbo-int8",
+      "disabled": true,
+      "disabledReason": "Requires dybur's Whisper INT8 model installed under ~/.dybur/models plus ONNX Runtime, Transformers, soundfile, and librosa in the benchmark Python environment."
+    },
+    {
+      "model": "whisper-large-v3-turbo-fp16",
+      "command": "python scripts/asr-candidates/whisper-onnx.py \"{audio}\" --model-id whisper-large-v3-turbo-fp16 --disable-optimizations",
+      "batchCommand": "python scripts/asr-candidates/whisper-onnx.py --manifest \"{manifest}\" --output \"{output}\" --model-id whisper-large-v3-turbo-fp16 --disable-optimizations",
+      "checkCommand": "python scripts/asr-candidates/whisper-onnx.py --preflight --model-id whisper-large-v3-turbo-fp16 --disable-optimizations",
+      "disabled": true,
+      "disabledReason": "Requires dybur's Whisper FP16 model installed under ~/.dybur/models plus ONNX Runtime, Transformers, soundfile, and librosa. This export requires --disable-optimizations with the current ORT CPU path."
+    },
+    {
       "model": "parakeet-tdt-v3-coreml",
       "command": "node scripts/asr-candidates/fluidaudio-coreml.js \"{audio}\"",
       "checkCommand": "node scripts/asr-candidates/fluidaudio-coreml.js --preflight",
@@ -13,6 +53,14 @@
       "checkCommand": "parakeet-mlx --help",
       "disabled": true,
       "disabledReason": "Requires macOS Apple Silicon with the parakeet-mlx runtime installed."
+    },
+    {
+      "model": "nemotron-35-asr-streaming-onnx-int4",
+      "command": "python scripts/asr-candidates/nemotron35-ortgenai.py \"{audio}\" --model onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+      "batchCommand": "python scripts/asr-candidates/nemotron35-ortgenai.py --manifest \"{manifest}\" --output \"{output}\" --model onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+      "checkCommand": "python scripts/asr-candidates/nemotron35-ortgenai.py --preflight",
+      "disabled": true,
+      "disabledReason": "Install ONNX Runtime GenAI, Hugging Face Hub, soundfile, and librosa in an isolated benchmark environment before enabling."
     },
     {
       "model": "qwen3-asr-0.6b",

@@ -35,6 +35,11 @@ export type ModelArchitecture =
 export type VocabType = 'text_file' | 'bpe';
 
 /**
+ * Registry visibility for model picker and normal download flows.
+ */
+export type ModelVisibility = 'normal' | 'legacy';
+
+/**
  * Role of a model file
  */
 export type FileRole =
@@ -83,6 +88,7 @@ export interface ModelDefinition {
   sizeBytes: number;
   languages: string[];
   isDefault: boolean;
+  visibility: ModelVisibility;
   config: ModelConfig;
 }
 
@@ -111,6 +117,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     sizeBytes: 661_000_000,
     languages: ['en'],
     isDefault: false,
+    visibility: 'legacy',
     config: {
       vocabType: 'text_file',
       sampleRate: 16000,
@@ -136,6 +143,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     sizeBytes: 670_000_000,
     languages: ['en', 'de', 'es', 'fr', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'ja', 'ko', 'zh'],
     isDefault: true,
+    visibility: 'normal',
     config: {
       vocabType: 'text_file',
       sampleRate: 16000,
@@ -160,6 +168,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     sizeBytes: 663_000_000,
     languages: ['en'],
     isDefault: false,
+    visibility: 'normal',
     config: {
       vocabType: 'text_file',
       sampleRate: 16000,
@@ -185,6 +194,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     sizeBytes: 1_100_000_000,
     languages: [], // All languages
     isDefault: false,
+    visibility: 'normal',
     config: {
       vocabType: 'bpe',
       sampleRate: 16000,
@@ -210,6 +220,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     sizeBytes: 1_600_000_000,
     languages: [],
     isDefault: false,
+    visibility: 'normal',
     config: {
       vocabType: 'bpe',
       sampleRate: 16000,
@@ -242,7 +253,7 @@ export function getDefaultModelDefinition(): ModelDefinition {
  * Get all available model definitions
  */
 export function getAvailableModels(): ModelDefinition[] {
-  return MODEL_REGISTRY;
+  return MODEL_REGISTRY.filter((model) => model.visibility === 'normal');
 }
 
 /**
