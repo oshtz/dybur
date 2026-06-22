@@ -180,69 +180,7 @@ The harness reports WER, CER, median latency, realtime factor, and per-tag summa
 
 Experimental model candidates such as CoreML Parakeet, MLX Parakeet, Qwen3-ASR, and Moonshine are tracked separately from production model IDs. Use `dybur models candidates` to inspect them, `scripts/asr-candidates/` for benchmark wrappers, and `docs/model-candidate-evaluation.md` for the benchmark workflow.
 
-### Release Verification
-
-Before publishing or checking the landing page against a new app release, verify the GitHub release contract:
-
-```sh
-pnpm release:verify
-pnpm release:verify:macos
-pnpm release:verify:windows
-```
-
-The verifier checks that the latest GitHub release tag matches `package.json`, that the stable public assets are present (`dybur-macos-arm64.dmg`, `dybur-windows-x64.exe`, and `dybur-update.json`), that the update manifest contains the expected platform URLs and SHA-256 hashes, that known legacy asset names are absent, and that `/latest/download/` URLs resolve.
-
-`pnpm release:verify` uses the GitHub Releases API. Set `GITHUB_TOKEN` or `GH_TOKEN` to use an authenticated request when local unauthenticated GitHub API rate limits are exhausted.
-
-`pnpm release:verify:macos` downloads the public DMG, records SHA-256 and file size, and reports that deeper mount/codesign/Gatekeeper checks require macOS. On a Mac, run `node scripts/verify-macos-release.js --require-macos-checks` to make those checks mandatory. For CI fixtures or locally downloaded artifacts, run `node scripts/verify-macos-release.js --input-file path/to/dybur-macos-arm64.dmg --skip-macos-checks --expected-sha256 <hash>`.
-
-Before pushing updater changes, build on macOS and smoke-test the local DMG
-installer path against a throwaway app bundle:
-
-```sh
-pnpm --filter @dybur/config --filter @dybur/core --filter @dybur/cli build
-pnpm --dir apps/tray build -- --target aarch64-apple-darwin
-
-DMG="$(find apps/tray/src-tauri/target -name '*.dmg' -type f | head -n 1)"
-HELPER="$(find apps/tray/src-tauri/target -path '*/release/dybur' -type f | head -n 1)"
-TMP="$(mktemp -d)"
-TARGET="$TMP/Installed/dybur.app"
-LOG="$TMP/updater.log"
-
-mkdir -p "$TARGET/Contents/MacOS"
-printf '#!/bin/sh\necho old\n' > "$TARGET/Contents/MacOS/dybur"
-chmod +x "$TARGET/Contents/MacOS/dybur"
-touch "$TARGET/Contents/old-marker"
-
-DYBUR_UPDATE_HELPER_SKIP_RELAUNCH=1 "$HELPER" \
-  --dybur-update-helper \
-  --platform macos-dmg \
-  --pid 999999 \
-  --artifact "$DMG" \
-  --target-exe "$TARGET/Contents/MacOS/dybur" \
-  --bundle "$TARGET" \
-  --relaunch "$TARGET/Contents/MacOS/dybur" \
-  --log "$LOG"
-
-test -x "$TARGET/Contents/MacOS/dybur"
-test ! -e "$TARGET/Contents/old-marker"
-test ! -d "$TARGET.bak"
-grep -q "installing macOS DMG update" "$LOG"
-grep -q "skipping relaunch" "$LOG"
-echo "macOS updater helper smoke passed"
-```
-
-On Windows, `pnpm release:verify:windows` also downloads the public portable EXE, records SHA-256 and file size, and reports Authenticode status. Add `-RequireSignature` when running `scripts/verify-windows-release.ps1` directly if signature validity should be a hard release gate. For locally built artifacts, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1 -InputFile path/to/dybur-windows-x64.exe -RequireSignature`.
-
-The Windows release workflow signs the final portable EXE when these GitHub secrets are present:
-
-- `WINDOWS_CERTIFICATE`: base64-encoded PFX code-signing certificate.
-- `WINDOWS_CERTIFICATE_PASSWORD`: PFX password.
-- `WINDOWS_TIMESTAMP_URL`: optional timestamp server; defaults to `http://timestamp.digicert.com`.
-
-When the certificate secrets are configured, CI runs the Windows verifier with `-RequireSignature` before upload. Without those secrets, the release remains unsigned and the verifier reports Authenticode status as a warning.
-
-Use [docs/release-smoke-checklist.md](docs/release-smoke-checklist.md) for the manual macOS, Windows, landing page, and ASR candidate smoke checks that cannot be fully proven from a non-interactive CI run.
+Release smoke checks live in [docs/release-smoke-checklist.md](docs/release-smoke-checklist.md).
 
 ## Requirements
 
