@@ -489,7 +489,7 @@ pub fn copy_current_exe_to_helper(
         .map(|ext| format!(".{}", ext.to_string_lossy()))
         .unwrap_or_default();
     let helper_path = update_dir.join(format!(
-        "dybur-update-helper-{}{}",
+        "dybur-helper-{}{}",
         std::process::id(),
         extension
     ));
@@ -973,6 +973,22 @@ mod tests {
         );
         assert_eq!(args.bundle_path, args.target_exe_path);
         assert_eq!(args.relaunch_path, args.target_exe_path);
+    }
+
+    #[test]
+    fn copied_helper_name_avoids_windows_installer_detection_keywords() {
+        let dir = unique_temp_dir("helper-name");
+        let source = dir.join("dybur.exe");
+        fs::write(&source, b"helper").unwrap();
+
+        let helper = copy_current_exe_to_helper(&source, &dir).unwrap();
+        let helper_name = helper.file_name().unwrap().to_string_lossy().to_lowercase();
+
+        assert!(!helper_name.contains("update"));
+        assert!(!helper_name.contains("install"));
+        assert!(!helper_name.contains("setup"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
