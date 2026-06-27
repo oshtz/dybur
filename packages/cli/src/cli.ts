@@ -3,6 +3,7 @@
  */
 
 import { parseArgs } from 'node:util';
+import { TRAY_APP_VERSION } from '@dybur/core';
 import { startCommand } from './commands/start.js';
 import { stopCommand } from './commands/stop.js';
 import { statusCommand } from './commands/status.js';
@@ -14,7 +15,7 @@ import { vadCommand } from './commands/vad.js';
 import { gpuCommand } from './commands/gpu.js';
 import { banner, brand, header, command, info, error, dim, cyan, boxMessage } from './ui.js';
 
-const VERSION = '1.2.1';
+const VERSION = TRAY_APP_VERSION.replace(/^v/, '');
 
 function showHelp(): void {
   banner();

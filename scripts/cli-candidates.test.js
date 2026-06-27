@@ -49,27 +49,12 @@ function runCli(t, args) {
 }
 
 describe('dybur CLI model candidates', () => {
-  it('shows active experimental candidates by default', (t) => {
+  it('does not ship the experimental candidates command', (t) => {
     const result = runCli(t, ['models', 'candidates']);
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Experimental Model Candidates/);
-    assert.match(result.stdout, /parakeet-tdt-v3-coreml/);
-    assert.match(result.stdout, /nemotron-35-asr-streaming-onnx-int4/);
-    assert.match(result.stdout, /qwen3-asr-0\.6b/);
-    assert.match(result.stdout, /moonshine-streaming-tiny/);
-    assert.doesNotMatch(result.stdout, /canary-1b-v2/);
-    assert.match(result.stdout, /Candidates are not production model IDs/);
-    assert.match(result.stdout, /dybur models candidates --all/);
-  });
-
-  it('includes deferred candidates when requested', (t) => {
-    const result = runCli(t, ['models', 'candidates', '--all']);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /canary-1b-v2/);
-    assert.match(result.stdout, /voxtral-mini-3b/);
-    assert.doesNotMatch(result.stdout, /dybur models candidates --all/);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /Unknown subcommand: candidates/);
+    assert.doesNotMatch(result.stdout, /Experimental Model Candidates/);
   });
 
   it('keeps candidates out of the production model registry', (t) => {

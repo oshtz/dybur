@@ -12,7 +12,6 @@ import {
   getModelDefinition,
   getDefaultModelDefinition,
   formatBytes,
-  getModelCandidates,
 } from '@dybur/core';
 import { getModelsDir, loadConfig, updateConfig } from '@dybur/config';
 import {
@@ -51,7 +50,6 @@ function showModelsHelp(): void {
   command('m list -a', 'Show all available models');
   command('m d, m download', 'Download a model (interactive)');
   command('m s, m set', 'Set active model (interactive)');
-  command('m candidates', 'Show experimental model candidates');
   command('m prefetch', 'Download default model');
   command('m clean', 'Remove unused models');
   console.log('');
@@ -59,9 +57,6 @@ function showModelsHelp(): void {
   console.log(`  ${brand.accent('Examples')}`);
   console.log(`  ${cyan('dybur m d')}                    ${dim('Interactive model download')}`);
   console.log(`  ${cyan('dybur m s')}                    ${dim('Interactive model selection')}`);
-  console.log(
-    `  ${cyan('dybur m candidates')}           ${dim('Review model benchmark candidates')}`
-  );
   console.log(
     `  ${cyan('dybur m d whisper-large-v3-turbo-int8')}  ${dim('Download specific model')}`
   );
@@ -461,52 +456,6 @@ async function cleanCommand(): Promise<void> {
   console.log('');
 }
 
-/**
- * Show experimental model candidates that need benchmarking/runtime work before
- * they become production-selectable dybur models.
- */
-async function candidatesCommand(showAll: boolean = false): Promise<void> {
-  header('Experimental Model Candidates');
-
-  const candidates = getModelCandidates({ includeDeferred: showAll });
-
-  for (const candidate of candidates) {
-    const badge =
-      candidate.recommendation === 'recommended'
-        ? green('[recommended spike]')
-        : candidate.recommendation === 'benchmark'
-          ? cyan('[benchmark]')
-          : dim('[defer]');
-
-    console.log(`  ${brand.accent(icons.bullet)} ${candidate.id} ${badge}`);
-    console.log(`    ${dim('Name:')} ${candidate.displayName}`);
-    console.log(`    ${dim('Runtime:')} ${candidate.runtime}`);
-    console.log(`    ${dim('Platforms:')} ${candidate.platforms.join(', ')}`);
-    console.log(`    ${dim('Languages:')} ${candidate.languageLabel}`);
-    console.log(`    ${dim('Size:')} ${candidate.sizeLabel}`);
-    console.log(`    ${dim('License:')} ${candidate.license}`);
-    console.log(`    ${dim('Source:')} ${candidate.sourceUrl}`);
-    console.log(`    ${dim('Why:')} ${candidate.rationale}`);
-    console.log(`    ${dim('Risk:')} ${candidate.integrationRisk}`);
-    console.log(`    ${dim('Next:')} ${candidate.nextStep}`);
-    if (candidate.benchmarkHint) {
-      console.log(`    ${dim('Command hint:')} ${candidate.benchmarkHint}`);
-    }
-    console.log('');
-  }
-
-  divider();
-  console.log('');
-  console.log(
-    `  ${dim('Candidates are not production model IDs. Benchmark them before adding app support.')}`
-  );
-  if (!showAll) {
-    console.log(`  ${dim('Show deferred candidates:')} ${cyan('dybur models candidates --all')}`);
-  }
-  console.log(`  ${dim('Benchmark help:')} ${cyan('docs/model-candidate-evaluation.md')}`);
-  console.log('');
-}
-
 export async function modelsCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
 
@@ -541,13 +490,6 @@ export async function modelsCommand(args: string[]): Promise<void> {
 
     case 'clean':
       await cleanCommand();
-      break;
-
-    case 'candidates':
-    case 'candidate':
-    case 'experimental':
-    case 'x':
-      await candidatesCommand(args.includes('--all') || args.includes('-a'));
       break;
 
     case undefined:

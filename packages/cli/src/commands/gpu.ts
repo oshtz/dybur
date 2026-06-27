@@ -3,7 +3,7 @@
  */
 
 import { loadConfig, saveConfig } from '@dybur/config';
-import { header, info, keyValue, brand, dim, success } from '../ui.js';
+import { header, info, keyValue, brand, dim, success, error } from '../ui.js';
 
 export async function gpuCommand(args: string[]): Promise<void> {
   const config = loadConfig();
@@ -41,8 +41,10 @@ export async function gpuCommand(args: string[]): Promise<void> {
     return;
   }
 
-  // Unknown subcommand - show help
+  error(`Unknown subcommand: ${subcommand}`);
+  console.log('');
   showHelp();
+  process.exit(1);
 }
 
 function showStatus(config: ReturnType<typeof loadConfig>): void {

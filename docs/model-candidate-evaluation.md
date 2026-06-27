@@ -37,8 +37,7 @@ Deferred candidates:
 - `canary-1b-v2`: revisit only if speech translation becomes a product goal.
 - `voxtral-mini-3b`: revisit only if dybur grows into audio understanding, summaries, or voice-command workflows.
 
-Use `dybur models candidates` to list active candidates and `dybur models candidates --all`
-to include deferred options.
+Use `packages/core/src/model-candidates.ts` to inspect active and deferred candidates.
 
 ## Benchmark Workflow
 

@@ -9,7 +9,6 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 
 const ROOT_DIR = join(import.meta.dirname, '..');
-const IS_WINDOWS = process.platform === 'win32';
 
 function run(command, cwd = ROOT_DIR) {
   console.log(`\n> ${command}`);
@@ -27,25 +26,10 @@ function buildPackage(name) {
   run('pnpm build', pkgDir);
 }
 
-function buildSidecar() {
-  console.log('\nBuilding CLI sidecar...');
-  const scriptsDir = join(ROOT_DIR, 'scripts');
-
-  if (IS_WINDOWS) {
-    const ps1Script = join(scriptsDir, 'build-sidecar.ps1');
-    if (existsSync(ps1Script)) {
-      run(`powershell -ExecutionPolicy Bypass -File "${ps1Script}"`, scriptsDir);
-    } else {
-      console.log('Warning: build-sidecar.ps1 not found, skipping sidecar build');
-    }
-  } else {
-    const shScript = join(scriptsDir, 'build-sidecar.sh');
-    if (existsSync(shScript)) {
-      run(`bash "${shScript}"`, scriptsDir);
-    } else {
-      console.log('Warning: build-sidecar.sh not found, skipping sidecar build');
-    }
-  }
+function buildPackages() {
+  buildPackage('config');
+  buildPackage('core');
+  buildPackage('cli');
 }
 
 function buildTrayApp() {
@@ -54,9 +38,6 @@ function buildTrayApp() {
     console.log('Skipping tray app (not initialized)');
     return;
   }
-
-  // Build CLI sidecar first
-  buildSidecar();
 
   console.log('\nBuilding apps/tray...');
   run('pnpm build', trayDir);
@@ -71,19 +52,16 @@ async function main() {
 
   switch (target) {
     case 'all':
-      buildPackage('config');
-      buildPackage('core');
-      buildPackage('cli');
+      buildPackages();
       buildTrayApp();
       break;
 
     case 'packages':
-      buildPackage('config');
-      buildPackage('core');
-      buildPackage('cli');
+      buildPackages();
       break;
 
     case 'tray':
+      buildPackages();
       buildTrayApp();
       break;
 

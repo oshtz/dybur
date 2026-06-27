@@ -115,8 +115,10 @@ export async function vadCommand(args: string[]): Promise<void> {
     return;
   }
 
-  // Unknown subcommand - show help
+  error(`Unknown subcommand: ${subcommand}`);
+  console.log('');
   showHelp();
+  process.exit(1);
 }
 
 function showStatus(config: ReturnType<typeof loadConfig>): void {

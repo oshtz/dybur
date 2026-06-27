@@ -3,12 +3,6 @@
 // src/cli.ts
 import { parseArgs } from "util";
 
-// src/commands/start.ts
-import { spawn, execSync } from "child_process";
-import { existsSync as existsSync5 } from "fs";
-import { join as join4 } from "path";
-import { homedir as homedir2 } from "os";
-
 // ../core/dist/models.js
 import { createWriteStream, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2, readdirSync, rmSync, statSync } from "fs";
 import { join as join2 } from "path";
@@ -747,123 +741,6 @@ function formatBytes(bytes) {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${unit}`;
 }
 
-// ../core/dist/model-candidates.js
-var MODEL_CANDIDATES = [
-  {
-    id: "parakeet-tdt-v3-coreml",
-    displayName: "Parakeet TDT v3 CoreML (Apple Silicon)",
-    provider: "FluidInference",
-    sourceUrl: "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml",
-    runtime: "coreml",
-    platforms: ["darwin-arm64"],
-    license: "CC-BY-4.0",
-    sizeLabel: "1.76 GB",
-    languageLabel: "25 European languages",
-    recommendation: "recommended",
-    rationale: "Highest value macOS spike: smaller than the MLX Parakeet bundle and aligned with native Apple acceleration.",
-    integrationRisk: "Requires a macOS-only CoreML adapter or Swift sidecar; it is not compatible with the current ONNX-only Rust STT path.",
-    nextStep: "Prototype a macOS adapter that invokes the CoreML package, then compare WER and latency against parakeet-tdt-v3-int8.",
-    benchmarkHint: 'node scripts/asr-candidates/fluidaudio-coreml.js "{audio}"'
-  },
-  {
-    id: "nemotron-35-asr-streaming-onnx-int4",
-    displayName: "Nemotron 3.5 ASR Streaming ONNX INT4",
-    provider: "ONNX Community / NVIDIA",
-    sourceUrl: "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
-    runtime: "onnxruntime_genai",
-    platforms: ["darwin-arm64", "windows-x64", "linux-x64"],
-    license: "MIT",
-    sizeLabel: "~0.67 GB INT4 ONNX",
-    languageLabel: "40 language-locales; English transcription-ready",
-    recommendation: "recommended",
-    rationale: "Best current spike for dybur live dictation: newer cache-aware Nemotron 3.5 streaming model, ONNX/int4 packaging, configurable low-latency chunking, punctuation, and capitalization.",
-    integrationRisk: "The ONNX INT4 export uses an ONNX Runtime GenAI-style package rather than dybur's current sherpa encoder/decoder/joiner session layout, so it needs a runtime adapter before becoming a production model ID.",
-    nextStep: "Benchmark with the candidate runner using the ONNX Runtime GenAI wrapper, then prototype a native ONNX Runtime GenAI adapter if WER and latency beat the current Nemotron export.",
-    benchmarkHint: 'python scripts/asr-candidates/nemotron35-ortgenai.py "{audio}" --model onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4'
-  },
-  {
-    id: "parakeet-tdt-v3-mlx",
-    displayName: "Parakeet TDT v3 MLX",
-    provider: "mlx-community",
-    sourceUrl: "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3",
-    runtime: "python_mlx",
-    platforms: ["darwin-arm64"],
-    license: "CC-BY-4.0",
-    sizeLabel: "2.51 GB",
-    languageLabel: "25 European languages",
-    recommendation: "benchmark",
-    rationale: "Useful Apple Silicon benchmark target for Parakeet v3 before deciding whether MLX belongs in the product runtime.",
-    integrationRisk: "Large download and Python/MLX dependency chain make it a poor production default without a native adapter.",
-    nextStep: "Run external benchmark commands with the ASR candidate runner and compare against ONNX and CoreML Parakeet.",
-    benchmarkHint: 'parakeet-mlx "{audio}" --model mlx-community/parakeet-tdt-0.6b-v3'
-  },
-  {
-    id: "qwen3-asr-0.6b",
-    displayName: "Qwen3-ASR 0.6B",
-    provider: "Qwen",
-    sourceUrl: "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
-    runtime: "python_transformers",
-    platforms: ["darwin-arm64", "windows-x64", "linux-x64"],
-    license: "Apache-2.0",
-    sizeLabel: "0.6B parameters",
-    languageLabel: "52 languages and dialects",
-    recommendation: "benchmark",
-    rationale: "Best candidate for broader multilingual coverage and unified offline/streaming behavior beyond Parakeet v3.",
-    integrationRisk: "Current dybur runtime cannot load this architecture directly; it needs a separate Transformers, MLX, or future ONNX adapter.",
-    nextStep: "Benchmark accuracy, latency, and memory on the same corpus before exposing it as an experimental model option.",
-    benchmarkHint: 'python scripts/asr-candidates/qwen3-asr.py "{audio}" --model Qwen/Qwen3-ASR-0.6B'
-  },
-  {
-    id: "moonshine-streaming-tiny",
-    displayName: "Moonshine Streaming Tiny",
-    provider: "Useful Sensors",
-    sourceUrl: "https://huggingface.co/UsefulSensors/moonshine-streaming-tiny",
-    runtime: "python_transformers",
-    platforms: ["darwin-arm64", "windows-x64", "linux-x64"],
-    license: "MIT",
-    sizeLabel: "44.1M parameters",
-    languageLabel: "English",
-    recommendation: "benchmark",
-    rationale: "Promising low-latency English option for lightweight dictation and constrained devices.",
-    integrationRisk: "Model card notes that the Transformers path is not fully efficient streaming yet; production value depends on a better runtime path.",
-    nextStep: "Benchmark short dictation latency and hallucination behavior against Nemotron streaming and Parakeet.",
-    benchmarkHint: 'python scripts/asr-candidates/moonshine-transformers.py "{audio}" --model UsefulSensors/moonshine-streaming-tiny'
-  },
-  {
-    id: "canary-1b-v2",
-    displayName: "Canary 1B v2",
-    provider: "NVIDIA",
-    sourceUrl: "https://huggingface.co/nvidia/canary-1b-v2",
-    runtime: "nemo",
-    platforms: ["linux-x64"],
-    license: "CC-BY-4.0",
-    sizeLabel: "1B parameters",
-    languageLabel: "25 European languages plus speech translation",
-    recommendation: "defer",
-    rationale: "Strong ASR/translation model, but dybur is a dictation app and this is less runtime-compatible than Parakeet/Qwen/Moonshine.",
-    integrationRisk: "NeMo/PyTorch/Linux/CUDA orientation does not fit dybur desktop packaging today.",
-    nextStep: "Revisit only if speech translation becomes a product goal."
-  },
-  {
-    id: "voxtral-mini-3b",
-    displayName: "Voxtral Mini 3B",
-    provider: "Mistral AI",
-    sourceUrl: "https://huggingface.co/mistralai/Voxtral-Mini-3B-2507",
-    runtime: "vllm",
-    platforms: ["linux-x64"],
-    license: "Apache-2.0",
-    sizeLabel: "Mini 3B label; Hugging Face lists 5B params and roughly 9.5 GB GPU RAM in fp16/bf16",
-    languageLabel: "8 major languages",
-    recommendation: "defer",
-    rationale: "Interesting for audio understanding, summaries, and voice-command workflows, not for lightweight plain dictation.",
-    integrationRisk: "Heavy vLLM/GPU runtime and broader speech-understanding behavior would expand the product surface substantially.",
-    nextStep: "Revisit only if dybur grows beyond text insertion into audio-understanding workflows."
-  }
-];
-function getModelCandidates(options = {}) {
-  return MODEL_CANDIDATES.filter((candidate) => options.includeDeferred || candidate.recommendation !== "defer");
-}
-
 // ../core/dist/logging.js
 import { existsSync as existsSync3, mkdirSync as mkdirSync3, appendFileSync } from "fs";
 var LOG_LEVEL_ORDER = {
@@ -970,7 +847,7 @@ import { promisify } from "util";
 var execAsync = promisify(exec);
 var GITHUB_REPO = "oshtz/dybur";
 var GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
-var TRAY_APP_VERSION = "v1.3.0";
+var TRAY_APP_VERSION = "v1.3.4";
 function getTrayAssetName() {
   const platform2 = getPlatform();
   const arch = getArch();
@@ -1117,6 +994,12 @@ async function downloadTrayApp(version = TRAY_APP_VERSION, onProgress) {
     throw error2;
   }
 }
+
+// src/commands/start.ts
+import { spawn, execSync } from "child_process";
+import { existsSync as existsSync5 } from "fs";
+import { join as join4 } from "path";
+import { homedir as homedir2 } from "os";
 
 // src/ui.ts
 import * as readline from "readline";
@@ -1992,16 +1875,12 @@ function showModelsHelp() {
   command("m list -a", "Show all available models");
   command("m d, m download", "Download a model (interactive)");
   command("m s, m set", "Set active model (interactive)");
-  command("m candidates", "Show experimental model candidates");
   command("m prefetch", "Download default model");
   command("m clean", "Remove unused models");
   console.log("");
   console.log(`  ${brand.accent("Examples")}`);
   console.log(`  ${cyan("dybur m d")}                    ${dim("Interactive model download")}`);
   console.log(`  ${cyan("dybur m s")}                    ${dim("Interactive model selection")}`);
-  console.log(
-    `  ${cyan("dybur m candidates")}           ${dim("Review model benchmark candidates")}`
-  );
   console.log(
     `  ${cyan("dybur m d whisper-large-v3-turbo-int8")}  ${dim("Download specific model")}`
   );
@@ -2301,38 +2180,6 @@ async function cleanCommand() {
   }
   console.log("");
 }
-async function candidatesCommand(showAll = false) {
-  header("Experimental Model Candidates");
-  const candidates = getModelCandidates({ includeDeferred: showAll });
-  for (const candidate of candidates) {
-    const badge = candidate.recommendation === "recommended" ? green("[recommended spike]") : candidate.recommendation === "benchmark" ? cyan("[benchmark]") : dim("[defer]");
-    console.log(`  ${brand.accent(icons.bullet)} ${candidate.id} ${badge}`);
-    console.log(`    ${dim("Name:")} ${candidate.displayName}`);
-    console.log(`    ${dim("Runtime:")} ${candidate.runtime}`);
-    console.log(`    ${dim("Platforms:")} ${candidate.platforms.join(", ")}`);
-    console.log(`    ${dim("Languages:")} ${candidate.languageLabel}`);
-    console.log(`    ${dim("Size:")} ${candidate.sizeLabel}`);
-    console.log(`    ${dim("License:")} ${candidate.license}`);
-    console.log(`    ${dim("Source:")} ${candidate.sourceUrl}`);
-    console.log(`    ${dim("Why:")} ${candidate.rationale}`);
-    console.log(`    ${dim("Risk:")} ${candidate.integrationRisk}`);
-    console.log(`    ${dim("Next:")} ${candidate.nextStep}`);
-    if (candidate.benchmarkHint) {
-      console.log(`    ${dim("Command hint:")} ${candidate.benchmarkHint}`);
-    }
-    console.log("");
-  }
-  divider();
-  console.log("");
-  console.log(
-    `  ${dim("Candidates are not production model IDs. Benchmark them before adding app support.")}`
-  );
-  if (!showAll) {
-    console.log(`  ${dim("Show deferred candidates:")} ${cyan("dybur models candidates --all")}`);
-  }
-  console.log(`  ${dim("Benchmark help:")} ${cyan("docs/model-candidate-evaluation.md")}`);
-  console.log("");
-}
 async function modelsCommand(args) {
   const subcommand = args[0];
   switch (subcommand) {
@@ -2359,12 +2206,6 @@ async function modelsCommand(args) {
       break;
     case "clean":
       await cleanCommand();
-      break;
-    case "candidates":
-    case "candidate":
-    case "experimental":
-    case "x":
-      await candidatesCommand(args.includes("--all") || args.includes("-a"));
       break;
     case void 0:
     case "--help":
@@ -2704,7 +2545,10 @@ async function vadCommand(args) {
     success(`VAD ${status}`);
     return;
   }
+  error(`Unknown subcommand: ${subcommand}`);
+  console.log("");
   showHelp();
+  process.exit(1);
 }
 function showStatus(config) {
   header("Voice Activity Detection");
@@ -2760,7 +2604,10 @@ async function gpuCommand(args) {
     success(`GPU acceleration ${status}`);
     return;
   }
+  error(`Unknown subcommand: ${subcommand}`);
+  console.log("");
   showHelp2();
+  process.exit(1);
 }
 function showStatus2(config) {
   header("GPU Acceleration");
@@ -2789,7 +2636,7 @@ function showHelp2() {
 }
 
 // src/cli.ts
-var VERSION = "1.2.1";
+var VERSION = TRAY_APP_VERSION.replace(/^v/, "");
 function showHelp3() {
   banner();
   console.log(`  ${dim("Local voice dictation for macOS & Windows")}`);

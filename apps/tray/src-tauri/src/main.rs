@@ -243,24 +243,6 @@ fn main() {
 
             log_info!("service", "dybur started. Press {} to dictate.", hotkey);
 
-            // Auto-install CLI to PATH on macOS (first launch)
-            #[cfg(target_os = "macos")]
-            {
-                let app_handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    check_and_install_cli(&app_handle);
-                });
-            }
-
-            // Auto-install CLI to PATH on Windows (first launch)
-            #[cfg(target_os = "windows")]
-            {
-                let app_handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    check_and_install_cli_windows(&app_handle);
-                });
-            }
-
             // Show FTUE window if needed (first launch or model not installed)
             if ftue::should_show_ftue() {
                 let app_handle = app.handle().clone();
@@ -319,7 +301,6 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     let run_setup = MenuItemBuilder::with_id("run_setup", "Run Setup Wizard...").build(app)?;
     let check_updates =
         MenuItemBuilder::with_id("check_updates", "Check for Updates...").build(app)?;
-    #[cfg(not(target_os = "windows"))]
     let install_cli =
         MenuItemBuilder::with_id("install_cli", "Install Command Line Tool...").build(app)?;
     let about = MenuItemBuilder::with_id("about", "About dybur").build(app)?;
@@ -330,7 +311,6 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .item(&run_setup)
         .item(&check_updates);
 
-    #[cfg(not(target_os = "windows"))]
     let settings_builder = settings_builder.item(&install_cli);
 
     let settings_submenu = settings_builder.separator().item(&about).build()?;
@@ -707,7 +687,6 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         "check_updates" => {
             start_update_check(app.clone(), true);
         }
-        #[cfg(not(target_os = "windows"))]
         "install_cli" => {
             install_cli_to_path(app);
         }
@@ -1027,7 +1006,7 @@ fn check_node_installed() -> bool {
     find_node_path().is_some()
 }
 
-/// Check if CLI is installed and prompt to install on first launch (macOS only)
+/// Install the CLI wrapper on macOS.
 #[cfg(target_os = "macos")]
 fn check_and_install_cli(app: &tauri::AppHandle) {
     use std::path::Path;
@@ -1190,7 +1169,7 @@ fn check_node_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Check if CLI is installed and install on first launch (Windows only)
+/// Install the CLI wrapper on Windows.
 #[cfg(target_os = "windows")]
 fn check_and_install_cli_windows(app: &tauri::AppHandle) {
     use std::process::Command;
@@ -1339,6 +1318,12 @@ fn check_and_install_cli_windows(app: &tauri::AppHandle) {
     }
 }
 
+/// Install CLI to user PATH (Windows only) - triggered from menu
+#[cfg(target_os = "windows")]
+fn install_cli_to_path(app: &tauri::AppHandle) {
+    check_and_install_cli_windows(app);
+}
+
 /// Install CLI to system PATH (macOS/Linux only) - triggered from menu
 #[cfg(not(target_os = "windows"))]
 fn install_cli_to_path(app: &tauri::AppHandle) {
@@ -1352,7 +1337,6 @@ fn install_cli_to_path(app: &tauri::AppHandle) {
         return;
     }
 
-    // Use the same installation logic as the auto-install
     check_and_install_cli(app);
 }
 

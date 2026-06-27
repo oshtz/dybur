@@ -139,7 +139,6 @@ dybur supports multiple speech recognition models. You can switch models from th
 ```sh
 dybur models list      # List available models
 dybur models set       # Select a model interactively
-dybur models candidates # Show experimental model candidates
 ```
 
 | Model                         | Size    | Languages | Description                                             |
@@ -178,7 +177,7 @@ pnpm eval:asr:gate benchmarks/asr/candidate-report.json --config benchmarks/asr/
 
 The harness reports WER, CER, median latency, realtime factor, and per-tag summaries. See `docs/asr-evaluation.md` for the manifest shape, reusable corpus policy, and recommended sample set.
 
-Experimental model candidates such as CoreML Parakeet, MLX Parakeet, Qwen3-ASR, and Moonshine are tracked separately from production model IDs. Use `dybur models candidates` to inspect them, `scripts/asr-candidates/` for benchmark wrappers, and `docs/model-candidate-evaluation.md` for the benchmark workflow.
+Experimental model candidates such as CoreML Parakeet, MLX Parakeet, Qwen3-ASR, and Moonshine are tracked separately from production model IDs. Use `packages/core/src/model-candidates.ts` to inspect them, `scripts/asr-candidates/` for benchmark wrappers, and `docs/model-candidate-evaluation.md` for the benchmark workflow.
 
 Release smoke checks live in [docs/release-smoke-checklist.md](docs/release-smoke-checklist.md).
 
@@ -193,7 +192,7 @@ Release smoke checks live in [docs/release-smoke-checklist.md](docs/release-smok
 
 On first launch, macOS will prompt for the following:
 
-- **Administrator Password** - To install the `dybur` CLI command to `/usr/local/bin` (one-time setup, can be skipped)
+- **Administrator Password** - Only if you choose **Install Command Line Tool...** from the tray menu
 - **Microphone Access** - Required for voice recording during dictation
 - **Accessibility** - Required for injecting text into applications (System Settings → Privacy & Security → Accessibility)
 
@@ -210,7 +209,6 @@ On first launch, macOS will prompt for the following:
 ```
 dybur/
 ├── apps/
-│   ├── cli/               # Rust CLI binary (sidecar for tray app)
 │   └── tray/              # Tauri 2.0 tray application
 ├── packages/
 │   ├── cli/               # Node.js CLI (@dybur/cli)
