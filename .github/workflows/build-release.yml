@@ -579,7 +579,7 @@ jobs:
             apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
   build-macos:
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Check Apple signing secrets
@@ -633,9 +633,6 @@ jobs:
         with:
           workspaces: |
             apps/tray/src-tauri -> target
-
-      - name: Clean cached ONNX Runtime link metadata
-        run: cargo clean --manifest-path apps/tray/src-tauri/Cargo.toml --target aarch64-apple-darwin -p ort-sys
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
