@@ -579,7 +579,7 @@ jobs:
             apps/tray/src-tauri/target/release/dybur-windows-x64.exe
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Check Apple signing secrets
