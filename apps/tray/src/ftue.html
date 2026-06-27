@@ -637,8 +637,8 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-text" onclick="skipSetup()">Skip Setup</button>
-            <button class="btn btn-primary" onclick="nextStep()">Get Started</button>
+            <button class="btn btn-text" data-action="skipSetup">Skip Setup</button>
+            <button class="btn btn-primary" data-action="nextStep">Get Started</button>
           </div>
         </div>
 
@@ -679,8 +679,8 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-secondary" onclick="prevStep()">Back</button>
-            <button class="btn btn-primary" id="step2-next" onclick="nextStep()" disabled>
+            <button class="btn btn-secondary" data-action="prevStep">Back</button>
+            <button class="btn btn-primary" id="step2-next" data-action="nextStep" disabled>
               Continue
             </button>
           </div>
@@ -716,8 +716,8 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-secondary" onclick="prevStep()">Back</button>
-            <button class="btn btn-primary" id="step3-next" onclick="nextStep()">Continue</button>
+            <button class="btn btn-secondary" data-action="prevStep">Back</button>
+            <button class="btn btn-primary" id="step3-next" data-action="nextStep">Continue</button>
           </div>
         </div>
 
@@ -747,8 +747,8 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-secondary" onclick="prevStep()" id="step4-back">Back</button>
-            <button class="btn btn-primary" id="step4-download" onclick="startDownload()">
+            <button class="btn btn-secondary" data-action="prevStep" id="step4-back">Back</button>
+            <button class="btn btn-primary" id="step4-download" data-action="startDownload">
               Download Model
             </button>
           </div>
@@ -783,8 +783,8 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-secondary" onclick="prevStep()">Back</button>
-            <button class="btn btn-primary" onclick="completeSetup()">Finish Setup</button>
+            <button class="btn btn-secondary" data-action="prevStep">Back</button>
+            <button class="btn btn-primary" data-action="completeSetup">Finish Setup</button>
           </div>
         </div>
 
@@ -813,7 +813,7 @@
           </div>
 
           <div class="buttons">
-            <button class="btn btn-primary" onclick="closeWindow()">Start Using dybur</button>
+            <button class="btn btn-primary" data-action="closeWindow">Start Using dybur</button>
           </div>
         </div>
       </div>
@@ -834,6 +834,30 @@
       // Tauri API (Tauri 2.x structure)
       const invoke = window.__TAURI__?.core?.invoke;
       const tauriEvent = window.__TAURI__?.event;
+      const actions = {
+        nextStep,
+        prevStep,
+        startDownload,
+        completeSetup,
+        skipSetup,
+        closeWindow,
+      };
+
+      function closestActionButton(target) {
+        for (let node = target; node && node !== document; node = node.parentNode) {
+          if (node.matches?.('button[data-action]')) {
+            return node;
+          }
+        }
+        return null;
+      }
+
+      document.addEventListener('click', (event) => {
+        const button = closestActionButton(event.target);
+        if (!button || button.disabled) return;
+
+        actions[button.dataset.action]?.();
+      });
 
       // Initialize
       document.addEventListener('DOMContentLoaded', async () => {
@@ -921,7 +945,7 @@
             document.getElementById('step4-download').textContent = 'Continue';
             document.getElementById('step4-download').disabled = false;
             document.getElementById('step4-back').disabled = false;
-            document.getElementById('step4-download').onclick = nextStep;
+            document.getElementById('step4-download').dataset.action = 'nextStep';
           });
 
           await tauriEvent.listen('ftue:download-error', (e) => {
@@ -1029,7 +1053,7 @@
         filename.textContent = model.displayName;
         size.textContent = model.size;
         button.disabled = false;
-        button.onclick = startDownload;
+        button.dataset.action = 'startDownload';
         back.disabled = false;
 
         if (model.installed) {
@@ -1251,7 +1275,7 @@
             document.getElementById('download-status').textContent = 'Download complete!';
             document.getElementById('step4-download').textContent = 'Continue';
             document.getElementById('step4-download').disabled = false;
-            document.getElementById('step4-download').onclick = nextStep;
+            document.getElementById('step4-download').dataset.action = 'nextStep';
             document.getElementById('step4-back').disabled = false;
           }
           updateDownloadProgress({

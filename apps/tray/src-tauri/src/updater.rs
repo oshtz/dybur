@@ -317,6 +317,28 @@ pub fn backup_path_for(target_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", target_path.to_string_lossy()))
 }
 
+fn retry_file_op<T>(mut operation: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut last_error = None;
+        for _ in 0..20 {
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    last_error = Some(error);
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| std::io::Error::last_os_error()))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        operation()
+    }
+}
+
 pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Result<(), String> {
     if !artifact_path.is_file() {
         return Err(format!(
@@ -332,7 +354,7 @@ pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Res
 
     let backup_path = backup_path_for(target_path);
     if backup_path.exists() {
-        fs::remove_file(&backup_path).map_err(|e| {
+        retry_file_op(|| fs::remove_file(&backup_path)).map_err(|e| {
             format!(
                 "Failed to remove stale backup {}: {}",
                 backup_path.display(),
@@ -343,7 +365,7 @@ pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Res
 
     let had_target = target_path.exists();
     if had_target {
-        fs::rename(target_path, &backup_path).map_err(|e| {
+        retry_file_op(|| fs::rename(target_path, &backup_path)).map_err(|e| {
             format!(
                 "Failed to move {} to backup {}: {}",
                 target_path.display(),
@@ -353,10 +375,10 @@ pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Res
         })?;
     }
 
-    if let Err(copy_error) = fs::copy(artifact_path, target_path) {
+    if let Err(copy_error) = retry_file_op(|| fs::copy(artifact_path, target_path)) {
         if had_target && backup_path.exists() {
-            let _ = fs::remove_file(target_path);
-            let _ = fs::rename(&backup_path, target_path);
+            let _ = retry_file_op(|| fs::remove_file(target_path));
+            let _ = retry_file_op(|| fs::rename(&backup_path, target_path));
         }
         return Err(format!(
             "Failed to copy update artifact {} to {}: {}",
@@ -367,7 +389,7 @@ pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Res
     }
 
     if backup_path.exists() {
-        fs::remove_file(&backup_path).map_err(|e| {
+        retry_file_op(|| fs::remove_file(&backup_path)).map_err(|e| {
             format!(
                 "Failed to remove backup {} after update: {}",
                 backup_path.display(),
@@ -488,11 +510,7 @@ pub fn copy_current_exe_to_helper(
         .extension()
         .map(|ext| format!(".{}", ext.to_string_lossy()))
         .unwrap_or_default();
-    let helper_path = update_dir.join(format!(
-        "dybur-helper-{}{}",
-        std::process::id(),
-        extension
-    ));
+    let helper_path = update_dir.join(format!("dybur-helper-{}{}", std::process::id(), extension));
 
     fs::copy(current_exe, &helper_path).map_err(|e| {
         format!(
@@ -544,16 +562,22 @@ pub fn run_update_helper(args: &HelperInstallArgs) -> Result<(), String> {
     append_helper_log(&args.log_path, "helper started");
     wait_for_process_exit(args.pid, Duration::from_secs(45), &args.log_path)?;
 
-    match args.platform {
+    let install_result = match args.platform {
         InstallPlatform::WindowsPortable => {
             append_helper_log(&args.log_path, "installing Windows portable update");
-            replace_file_with_backup(&args.artifact_path, &args.target_exe_path)?;
+            replace_file_with_backup(&args.artifact_path, &args.target_exe_path)
         }
         InstallPlatform::MacDmg => {
             append_helper_log(&args.log_path, "installing macOS DMG update");
-            install_macos_dmg(&args.artifact_path, &args.bundle_path, &args.log_path)?;
+            install_macos_dmg(&args.artifact_path, &args.bundle_path, &args.log_path)
         }
+    };
+
+    if let Err(error) = install_result {
+        append_helper_log(&args.log_path, &format!("install failed: {}", error));
+        return Err(error);
     }
+    append_helper_log(&args.log_path, "install complete");
 
     if env::var_os("DYBUR_UPDATE_HELPER_SKIP_RELAUNCH").is_some() {
         append_helper_log(&args.log_path, "skipping relaunch by environment request");
@@ -565,13 +589,16 @@ pub fn run_update_helper(args: &HelperInstallArgs) -> Result<(), String> {
         &args.log_path,
         &format!("relaunching dybur from {}", args.relaunch_path.display()),
     );
-    Command::new(&program).args(program_args).spawn().map_err(|e| {
-        format!(
-            "Failed to relaunch dybur from {}: {}",
-            args.relaunch_path.display(),
-            e
-        )
-    })?;
+    Command::new(&program)
+        .args(program_args)
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to relaunch dybur from {}: {}",
+                args.relaunch_path.display(),
+                e
+            )
+        })?;
 
     Ok(())
 }
