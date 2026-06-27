@@ -1320,12 +1320,17 @@
       }
 
       async function closeWindow() {
+        let closedViaInvoke = false;
         if (invoke) {
           try {
             await invoke('ftue_close');
+            closedViaInvoke = true;
           } catch (e) {
             console.error('Failed to close via invoke:', e);
           }
+        }
+        if (closedViaInvoke) {
+          return;
         }
         // Also try the Tauri 2.x window API as fallback
         try {

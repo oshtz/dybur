@@ -114,6 +114,9 @@ fn main() {
             ftue::ftue_get_models,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // Load configuration
             let state = app.state::<Mutex<AppState>>();
             let model_name: String;

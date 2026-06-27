@@ -40,7 +40,7 @@ pub struct SelectedUpdate {
     pub asset: UpdateAsset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPlatform {
     WindowsPortable,
     MacDmg,
@@ -121,8 +121,11 @@ pub fn helper_install_args_for(
         pid,
         artifact_path,
         target_exe_path: current_exe.clone(),
+        relaunch_path: match platform {
+            InstallPlatform::WindowsPortable => current_exe,
+            InstallPlatform::MacDmg => bundle_path.clone(),
+        },
         bundle_path,
-        relaunch_path: current_exe,
         log_path,
     })
 }
@@ -557,8 +560,12 @@ pub fn run_update_helper(args: &HelperInstallArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    append_helper_log(&args.log_path, "relaunching dybur");
-    Command::new(&args.relaunch_path).spawn().map_err(|e| {
+    let (program, program_args) = relaunch_command_parts(args);
+    append_helper_log(
+        &args.log_path,
+        &format!("relaunching dybur from {}", args.relaunch_path.display()),
+    );
+    Command::new(&program).args(program_args).spawn().map_err(|e| {
         format!(
             "Failed to relaunch dybur from {}: {}",
             args.relaunch_path.display(),
@@ -567,6 +574,16 @@ pub fn run_update_helper(args: &HelperInstallArgs) -> Result<(), String> {
     })?;
 
     Ok(())
+}
+
+fn relaunch_command_parts(args: &HelperInstallArgs) -> (PathBuf, Vec<String>) {
+    match args.platform {
+        InstallPlatform::WindowsPortable => (args.relaunch_path.clone(), Vec::new()),
+        InstallPlatform::MacDmg => (
+            PathBuf::from("open"),
+            vec![args.relaunch_path.to_string_lossy().to_string()],
+        ),
+    }
 }
 
 fn wait_for_process_exit(pid: u32, timeout: Duration, log_path: &Path) -> Result<(), String> {
@@ -978,7 +995,27 @@ mod tests {
             args.target_exe_path,
             PathBuf::from("/Users/user/.dybur/bin/dybur.app/Contents/MacOS/dybur")
         );
-        assert_eq!(args.relaunch_path, args.target_exe_path);
+        assert_eq!(
+            args.relaunch_path,
+            PathBuf::from("/Users/user/.dybur/bin/dybur.app")
+        );
+    }
+
+    #[test]
+    fn macos_relaunch_uses_open_on_app_bundle() {
+        let args = HelperInstallArgs {
+            platform: InstallPlatform::MacDmg,
+            pid: 77,
+            artifact_path: PathBuf::from("/tmp/dybur.dmg"),
+            target_exe_path: PathBuf::from("/Applications/dybur.app/Contents/MacOS/dybur"),
+            bundle_path: PathBuf::from("/Applications/dybur.app"),
+            relaunch_path: PathBuf::from("/Applications/dybur.app"),
+            log_path: PathBuf::from("/tmp/updater.log"),
+        };
+
+        let (program, program_args) = relaunch_command_parts(&args);
+        assert_eq!(program, PathBuf::from("open"));
+        assert_eq!(program_args, vec!["/Applications/dybur.app"]);
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
