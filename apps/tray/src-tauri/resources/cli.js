@@ -847,7 +847,7 @@ import { promisify } from "util";
 var execAsync = promisify(exec);
 var GITHUB_REPO = "oshtz/dybur";
 var GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
-var TRAY_APP_VERSION = "v1.3.4";
+var TRAY_APP_VERSION = "v1.3.6";
 function getTrayAssetName() {
   const platform2 = getPlatform();
   const arch = getArch();

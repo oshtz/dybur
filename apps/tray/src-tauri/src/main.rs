@@ -30,6 +30,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use audio::{get_audio_error_help, list_input_devices};
@@ -100,6 +101,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
@@ -299,6 +304,9 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
     let run_diagnostics =
         MenuItemBuilder::with_id("run_diagnostics", "Run Diagnostics").build(app)?;
     let run_setup = MenuItemBuilder::with_id("run_setup", "Run Setup Wizard...").build(app)?;
+    let launch_on_startup =
+        MenuItemBuilder::with_id("launch_on_startup", launch_on_startup_menu_label(app))
+            .build(app)?;
     let check_updates =
         MenuItemBuilder::with_id("check_updates", "Check for Updates...").build(app)?;
     let install_cli =
@@ -309,6 +317,7 @@ fn create_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::W
         .item(&open_config)
         .item(&run_diagnostics)
         .item(&run_setup)
+        .item(&launch_on_startup)
         .item(&check_updates);
 
     let settings_builder = settings_builder.item(&install_cli);
@@ -684,6 +693,9 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
         "run_setup" => {
             run_setup_wizard(app);
         }
+        "launch_on_startup" => {
+            toggle_launch_on_startup(app);
+        }
         "check_updates" => {
             start_update_check(app.clone(), true);
         }
@@ -770,6 +782,47 @@ fn open_config_file(app: &tauri::AppHandle) {
     ) {
         log_error!("service", "Failed to open config file: {:?}", e);
     }
+}
+
+fn launch_on_startup_menu_label(app: &tauri::AppHandle) -> String {
+    format!(
+        "{}Launch on startup",
+        selection_prefix(is_launch_on_startup_enabled(app))
+    )
+}
+
+fn is_launch_on_startup_enabled(app: &tauri::AppHandle) -> bool {
+    match app.autolaunch().is_enabled() {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            log_error!("service", "Failed to read launch-on-startup state: {}", e);
+            false
+        }
+    }
+}
+
+fn toggle_launch_on_startup(app: &tauri::AppHandle) {
+    let autolaunch = app.autolaunch();
+    let result = match autolaunch.is_enabled() {
+        Ok(true) => autolaunch.disable().map(|_| false),
+        Ok(false) => autolaunch.enable().map(|_| true),
+        Err(e) => Err(e),
+    };
+
+    match result {
+        Ok(enabled) => {
+            let status = if enabled { "enabled" } else { "disabled" };
+            log_info!("service", "Launch on startup {}", status);
+            show_user_notification("dybur", &format!("Launch on startup {}", status));
+        }
+        Err(e) => {
+            let message = format!("Failed to update launch on startup: {}", e);
+            log_error!("service", "{}", message);
+            show_user_alert("dybur", &message);
+        }
+    }
+
+    rebuild_tray_menu(app);
 }
 
 /// Run diagnostics and show results via notification
