@@ -580,6 +580,7 @@ jobs:
 
   build-macos:
     runs-on: macos-26
+    timeout-minutes: 90
 
     steps:
       - name: Check Apple signing secrets
@@ -659,6 +660,8 @@ jobs:
           security create-keychain -p actions build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p actions build.keychain
+          # Default auto-lock is 300s; a cold Rust build outlasts that and codesign then hangs on an unlock prompt.
+          security set-keychain-settings -lut 21600 build.keychain
           security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
           rm certificate.p12
