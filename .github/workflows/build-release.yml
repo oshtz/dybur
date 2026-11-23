@@ -357,41 +357,25 @@ jobs:
               }
           }
 
-          # Verify we have at least one ONNX runtime DLL - if not, download it
-          $hasOnnxRuntime = Get-ChildItem -Path $evbStaging -Filter "onnxruntime*.dll" -ErrorAction SilentlyContinue
-          if (-not $hasOnnxRuntime) {
-            Write-Host "ONNX runtime DLL not found in cache locations. Downloading directly..."
+          # ort 2.0.0-rc.11 (download-binaries) links ONNX Runtime statically into
+          # dybur.exe, so the only runtime DLL it needs is DirectML.dll. The old
+          # onnxruntime.dll download from microsoft/onnxruntime GitHub releases was
+          # never loaded, and those release assets are no longer available.
+          # Prove the exe does not import onnxruntime.dll instead of assuming it.
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find "**\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) {
+            throw "dumpbin.exe not found; cannot verify DLL imports of $inputExe"
+          }
+          $imports = & $dumpbin /nologo /dependents $inputExe | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '\.dll$' }
+          Write-Host "=== DLL imports of $(Split-Path $inputExe -Leaf) ==="
+          $imports | ForEach-Object { Write-Host "  $_" }
+          if ($imports -match '^onnxruntime') {
+            throw "dybur.exe imports onnxruntime.dll, so ONNX Runtime is no longer statically linked; bundle a matching onnxruntime.dll before releasing"
+          }
 
-            # Download ONNX Runtime 1.19.2 (compatible with ort 2.0.0-rc.11)
-            $ortVersion = "1.19.2"
-            $ortUrl = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
-            $ortZip = Join-Path $env:RUNNER_TEMP "onnxruntime.zip"
-            $ortExtract = Join-Path $env:RUNNER_TEMP "onnxruntime"
-
-            Write-Host "Downloading ONNX Runtime v$ortVersion..."
-            Invoke-WebRequest -Uri $ortUrl -OutFile $ortZip -UseBasicParsing
-
-            Write-Host "Extracting ONNX Runtime..."
-            Expand-Archive -Path $ortZip -DestinationPath $ortExtract -Force
-
-            # Find and copy the DLLs
-            $ortDlls = Get-ChildItem -Path $ortExtract -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match "^onnxruntime" }
-            foreach ($dll in $ortDlls) {
-              $destPath = Join-Path $evbStaging $dll.Name
-              if (-not (Test-Path $destPath)) {
-                Copy-Item -Path $dll.FullName -Destination $evbStaging -Force
-                $sizeMB = [math]::Round($dll.Length / 1MB, 2)
-                Write-Host "Included $($dll.Name) from direct download ($sizeMB MB)"
-              }
-            }
-
-            # Verify again after download
-            $hasOnnxRuntime = Get-ChildItem -Path $evbStaging -Filter "onnxruntime*.dll" -ErrorAction SilentlyContinue
-            if (-not $hasOnnxRuntime) {
-              Write-Host "ERROR: Failed to obtain ONNX runtime DLL even after direct download!"
-              throw "Critical dependency missing: onnxruntime.dll not found"
-            }
+          $directMl = Get-Item (Join-Path $evbStaging "DirectML.dll") -ErrorAction SilentlyContinue
+          if (-not $directMl -or $directMl.Length -lt 1MB) {
+            throw "Critical dependency missing: DirectML.dll not found in staging (or smaller than 1 MB)"
           }
 
           # Include the CLI JS in the portable bundle (requires Node.js at runtime)
