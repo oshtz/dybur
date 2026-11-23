@@ -5,8 +5,29 @@
 //! - macOS: CoreML (Apple Silicon / Intel Macs)
 //! - All platforms: CPU fallback
 
-use ort::session::Session;
+use ort::{environment::Environment, session::Session};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// Process-wide ONNX Runtime environment shared by every session.
+///
+/// `ort` allows only one environment per process, and `Session::builder` needs it
+/// explicitly, so build it lazily on first use and keep it for the process lifetime.
+fn environment() -> Result<&'static Environment, ort::Error> {
+    static ENV: OnceLock<Environment> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
+
+    if let Some(env) = ENV.get() {
+        return Ok(env);
+    }
+    // Serialize creation: a second `build()` in the same process returns an error.
+    let _guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(env) = ENV.get() {
+        return Ok(env);
+    }
+    let env = ort::init().build()?;
+    Ok(ENV.get_or_init(|| env))
+}
 
 /// Execution provider preference
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -85,7 +106,7 @@ pub fn build_session(
     // CPU-only mode - skip GPU provider setup
     if config.gpu_preference == GpuPreference::CpuOnly {
         crate::log_info!("ort", "GPU disabled, using CPU execution provider");
-        let session = Session::builder()?
+        let session = Session::builder(environment()?)?
             .with_intra_threads(config.intra_threads)?
             .commit_from_file(model_path)?;
 
@@ -115,7 +136,7 @@ pub fn build_session(
             "ort",
             "No GPU providers available for this platform, using CPU"
         );
-        let session = Session::builder()?
+        let session = Session::builder(environment()?)?
             .with_intra_threads(config.intra_threads)?
             .commit_from_file(model_path)?;
 
@@ -135,13 +156,13 @@ fn build_session_windows(
     model_path: &Path,
     config: &SessionConfig,
 ) -> Result<(Session, ExecutionProviderResult), ort::Error> {
-    use ort::execution_providers::DirectMLExecutionProvider;
+    use ort::ep::DirectML;
 
     crate::log_info!("ort", "Attempting to register DirectML execution provider");
 
     // Try DirectML first
-    let dml_result = Session::builder()?
-        .with_execution_providers([DirectMLExecutionProvider::default().build()])?
+    let dml_result = Session::builder(environment()?)?
+        .with_execution_providers([DirectML::default().build()])?
         .with_intra_threads(config.intra_threads)?
         .commit_from_file(model_path);
 
@@ -164,7 +185,7 @@ fn build_session_windows(
             );
 
             // Fall back to CPU
-            let session = Session::builder()?
+            let session = Session::builder(environment()?)?
                 .with_intra_threads(config.intra_threads)?
                 .commit_from_file(model_path)?;
 
@@ -185,13 +206,13 @@ fn build_session_macos(
     model_path: &Path,
     config: &SessionConfig,
 ) -> Result<(Session, ExecutionProviderResult), ort::Error> {
-    use ort::execution_providers::CoreMLExecutionProvider;
+    use ort::ep::CoreML;
 
     crate::log_info!("ort", "Attempting to register CoreML execution provider");
 
     // Try CoreML
-    let coreml_result = Session::builder()?
-        .with_execution_providers([CoreMLExecutionProvider::default().build()])?
+    let coreml_result = Session::builder(environment()?)?
+        .with_execution_providers([CoreML::default().build()])?
         .with_intra_threads(config.intra_threads)?
         .commit_from_file(model_path);
 
@@ -214,7 +235,7 @@ fn build_session_macos(
             );
 
             // Fall back to CPU
-            let session = Session::builder()?
+            let session = Session::builder(environment()?)?
                 .with_intra_threads(config.intra_threads)?
                 .commit_from_file(model_path)?;
 
