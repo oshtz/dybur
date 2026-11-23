@@ -14,8 +14,7 @@ use crate::tokenizer::BpeTokenizer;
 use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
 use ort::{
     session::{Session, SessionOutputs},
-    tensor::TensorElementType,
-    value::{DynValue, Tensor, TensorRef, ValueType},
+    value::{DynValue, Tensor, TensorElementType, TensorRef, ValueType},
 };
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::path::PathBuf;
