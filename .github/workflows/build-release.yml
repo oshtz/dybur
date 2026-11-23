@@ -17,6 +17,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned: Rust 1.100 moved build script output dirs (target/<profile>/build/<pkg>/<hash>/out),
+  # which breaks ort-sys 2.0.0-rc.11's DLL copy on Windows (it walks up a fixed 3 levels).
+  # Unpin only together with an ort upgrade that handles the new layout.
+  RUST_TOOLCHAIN: 1.99.1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -58,9 +62,9 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -625,8 +629,9 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-darwin
 
       - name: Rust cache
