@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// v2 manifest, read by builds whose macOS updater works (1.3.8+). Releases keep
+/// publishing the legacy `dybur-update.json` without macOS entries, because 1.3.0-1.3.7
+/// on macOS cannot install updates and would quit on every launch if offered one.
 pub const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/oshtz/dybur/releases/latest/download/dybur-update.json";
+    "https://github.com/oshtz/dybur/releases/latest/download/dybur-update-v2.json";
 pub const UPDATE_MANIFEST_URL_ENV: &str = "DYBUR_UPDATE_MANIFEST_URL";
 pub const UPDATE_HELPER_FLAG: &str = "--dybur-update-helper";
 
@@ -49,6 +52,7 @@ pub enum InstallPlatform {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelperInstallArgs {
     pub platform: InstallPlatform,
+    pub version: String,
     pub pid: u32,
     pub artifact_path: PathBuf,
     pub target_exe_path: PathBuf,
@@ -101,6 +105,7 @@ fn macos_bundle_path_from_exe(current_exe: &Path) -> Option<PathBuf> {
 
 pub fn helper_install_args_for(
     platform: InstallPlatform,
+    version: &str,
     pid: u32,
     artifact_path: PathBuf,
     current_exe: PathBuf,
@@ -118,6 +123,7 @@ pub fn helper_install_args_for(
 
     Ok(HelperInstallArgs {
         platform,
+        version: version.to_string(),
         pid,
         artifact_path,
         target_exe_path: current_exe.clone(),
@@ -244,6 +250,8 @@ pub fn build_helper_args(args: &HelperInstallArgs) -> Vec<String> {
         UPDATE_HELPER_FLAG.to_string(),
         "--platform".to_string(),
         args.platform.as_arg().to_string(),
+        "--version".to_string(),
+        args.version.clone(),
         "--pid".to_string(),
         args.pid.to_string(),
         "--artifact".to_string(),
@@ -265,6 +273,7 @@ pub fn parse_helper_args(args: &[String]) -> Result<Option<HelperInstallArgs>, S
     }
 
     let mut platform = None;
+    let mut version = None;
     let mut pid = None;
     let mut artifact_path = None;
     let mut target_exe_path = None;
@@ -281,6 +290,7 @@ pub fn parse_helper_args(args: &[String]) -> Result<Option<HelperInstallArgs>, S
 
         match key {
             "--platform" => platform = Some(InstallPlatform::parse(value)?),
+            "--version" => version = Some(value.clone()),
             "--pid" => {
                 pid = Some(
                     value
@@ -301,6 +311,7 @@ pub fn parse_helper_args(args: &[String]) -> Result<Option<HelperInstallArgs>, S
 
     Ok(Some(HelperInstallArgs {
         platform: platform.ok_or_else(|| "Missing update helper platform".to_string())?,
+        version: version.ok_or_else(|| "Missing update helper version".to_string())?,
         pid: pid.ok_or_else(|| "Missing update helper pid".to_string())?,
         artifact_path: artifact_path
             .ok_or_else(|| "Missing update helper artifact path".to_string())?,
@@ -403,6 +414,88 @@ pub fn replace_file_with_backup(artifact_path: &Path, target_path: &Path) -> Res
 
 pub fn update_work_dir() -> PathBuf {
     crate::config::get_data_dir().join("updates")
+}
+
+const FAILED_UPDATE_MARKER: &str = "failed-update-version";
+
+/// Records a version whose install failed so automatic checks skip it.
+pub fn record_failed_update(update_dir: &Path, version: &str) {
+    let _ = fs::create_dir_all(update_dir);
+    let _ = fs::write(update_dir.join(FAILED_UPDATE_MARKER), version);
+}
+
+/// Version whose install last failed, if any.
+pub fn failed_update_version(update_dir: &Path) -> Option<String> {
+    fs::read_to_string(update_dir.join(FAILED_UPDATE_MARKER))
+        .ok()
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+}
+
+pub fn clear_failed_update(update_dir: &Path) {
+    let _ = fs::remove_file(update_dir.join(FAILED_UPDATE_MARKER));
+}
+
+/// Removes leftovers from earlier updates (helper copies, downloaded installers),
+/// keeping only the failed-version marker. Errors are ignored: a file still in use
+/// (a helper that is just exiting on Windows) is picked up next launch.
+pub fn clean_update_dir(update_dir: &Path) {
+    let Ok(entries) = fs::read_dir(update_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if entry.file_name() == FAILED_UPDATE_MARKER {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Directory the installer must write into: the folder holding the `.app` bundle on
+/// macOS, or the folder holding the portable EXE on Windows.
+pub fn install_parent_dir(platform: InstallPlatform, current_exe: &Path) -> Option<PathBuf> {
+    let installed = match platform {
+        InstallPlatform::WindowsPortable => current_exe.to_path_buf(),
+        InstallPlatform::MacDmg => macos_bundle_path_from_exe(current_exe)?,
+    };
+    installed.parent().map(Path::to_path_buf)
+}
+
+/// Checks whether the app can replace itself where it runs. This is false when it
+/// runs from a mounted DMG (`/Volumes/...`), from macOS App Translocation (a
+/// read-only mount used for quarantined apps opened outside /Applications), or
+/// from a folder the user cannot write to. The check creates and removes a probe
+/// file, which is the only reliable test across all of those.
+pub fn can_install_update_at(platform: InstallPlatform, current_exe: &Path) -> Result<(), String> {
+    let path_text = current_exe.to_string_lossy();
+    if platform == InstallPlatform::MacDmg
+        && (path_text.starts_with("/Volumes/") || path_text.contains("/AppTranslocation/"))
+    {
+        return Err(
+            "dybur is running from the disk image or a temporary location. Move dybur to the Applications folder to enable updates."
+                .to_string(),
+        );
+    }
+
+    let parent = install_parent_dir(platform, current_exe)
+        .ok_or_else(|| format!("Cannot find install folder for {}", current_exe.display()))?;
+    let probe = parent.join(format!(".dybur-update-probe-{}", std::process::id()));
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "dybur cannot update itself because {} is not writable ({}). Install the new version manually.",
+            parent.display(),
+            e
+        )),
+    }
 }
 
 pub fn updater_log_path() -> PathBuf {
@@ -524,8 +617,55 @@ pub fn copy_current_exe_to_helper(
     Ok(helper_path)
 }
 
+/// Chooses the executable that runs the update helper.
+///
+/// Windows locks a running EXE, so the helper must run from a copy or it could not
+/// replace the portable app. On macOS the binary's code signature is sealed to its
+/// `.app` bundle (Info.plist and resources): a loose copy fails validation and the
+/// kernel SIGKILLs it at exec, so the helper runs in place instead. That is safe
+/// because the install only renames and deletes the bundle on disk, which does not
+/// affect the already-mapped running image.
+pub fn helper_executable_for(
+    platform: InstallPlatform,
+    current_exe: &Path,
+    update_dir: &Path,
+) -> Result<PathBuf, String> {
+    match platform {
+        InstallPlatform::WindowsPortable => copy_current_exe_to_helper(current_exe, update_dir),
+        InstallPlatform::MacDmg => Ok(current_exe.to_path_buf()),
+    }
+}
+
+/// How long the helper must stay alive after spawn before the app quits for it.
+/// A healthy helper waits for the app to exit, so it is still running at this point;
+/// one killed at exec (bad signature, missing file) has already exited.
+const HELPER_STARTUP_GRACE: Duration = Duration::from_millis(1000);
+
+/// Fails if the spawned helper exits within the grace period, so the app keeps
+/// running instead of quitting with nothing left to install the update.
+fn ensure_helper_started(
+    child: &mut std::process::Child,
+    helper_path: &Path,
+    grace: Duration,
+) -> Result<(), String> {
+    std::thread::sleep(grace);
+    match child.try_wait() {
+        Ok(None) => Ok(()),
+        Ok(Some(status)) => Err(format!(
+            "Update helper {} exited right after launch ({})",
+            helper_path.display(),
+            status
+        )),
+        Err(e) => Err(format!(
+            "Failed to check update helper {}: {}",
+            helper_path.display(),
+            e
+        )),
+    }
+}
+
 pub fn spawn_update_helper(args: &HelperInstallArgs, current_exe: &Path) -> Result<(), String> {
-    let helper_path = copy_current_exe_to_helper(current_exe, &update_work_dir())?;
+    let helper_path = helper_executable_for(args.platform, current_exe, &update_work_dir())?;
     let helper_args = build_helper_args(args);
     let mut command = Command::new(&helper_path);
     command.args(helper_args);
@@ -537,7 +677,7 @@ pub fn spawn_update_helper(args: &HelperInstallArgs, current_exe: &Path) -> Resu
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    command.spawn().map_err(|e| {
+    let mut child = command.spawn().map_err(|e| {
         format!(
             "Failed to launch update helper {}: {}",
             helper_path.display(),
@@ -545,7 +685,7 @@ pub fn spawn_update_helper(args: &HelperInstallArgs, current_exe: &Path) -> Resu
         )
     })?;
 
-    Ok(())
+    ensure_helper_started(&mut child, &helper_path, HELPER_STARTUP_GRACE)
 }
 
 pub fn run_helper_from_env() -> Result<bool, String> {
@@ -573,12 +713,25 @@ pub fn run_update_helper(args: &HelperInstallArgs) -> Result<(), String> {
         }
     };
 
+    let update_dir = update_work_dir();
     if let Err(error) = install_result {
         append_helper_log(&args.log_path, &format!("install failed: {}", error));
+        // Remember the version so startup checks stop retrying it (and quitting the
+        // app each time), then bring the existing install back up. A failed install
+        // restores the original bundle/EXE from its backup, so it is still there.
+        record_failed_update(&update_dir, &args.version);
+        if let Err(relaunch_error) = relaunch_app(args) {
+            append_helper_log(&args.log_path, &relaunch_error);
+        }
         return Err(error);
     }
     append_helper_log(&args.log_path, "install complete");
+    clear_failed_update(&update_dir);
 
+    relaunch_app(args)
+}
+
+fn relaunch_app(args: &HelperInstallArgs) -> Result<(), String> {
     if env::var_os("DYBUR_UPDATE_HELPER_SKIP_RELAUNCH").is_some() {
         append_helper_log(&args.log_path, "skipping relaunch by environment request");
         return Ok(());
@@ -925,6 +1078,7 @@ mod tests {
     fn helper_args_round_trip_all_required_paths() {
         let expected = HelperInstallArgs {
             platform: InstallPlatform::WindowsPortable,
+            version: "1.3.8".to_string(),
             pid: 42,
             artifact_path: PathBuf::from(r"C:\Users\USER\AppData\Local\Temp\dybur-new.exe"),
             target_exe_path: PathBuf::from(r"C:\Users\USER\.dybur\bin\dybur.exe"),
@@ -985,6 +1139,7 @@ mod tests {
     fn helper_install_args_target_current_windows_exe() {
         let args = helper_install_args_for(
             InstallPlatform::WindowsPortable,
+            "1.3.8",
             55,
             PathBuf::from(r"C:\Temp\dybur-new.exe"),
             PathBuf::from(r"C:\Users\USER\.dybur\bin\dybur.exe"),
@@ -1019,9 +1174,138 @@ mod tests {
     }
 
     #[test]
+    fn macos_helper_runs_in_place_without_copying() {
+        let dir = unique_temp_dir("helper-macos");
+        let exe = PathBuf::from("/Applications/dybur.app/Contents/MacOS/dybur");
+
+        let helper = helper_executable_for(InstallPlatform::MacDmg, &exe, &dir).unwrap();
+
+        assert_eq!(helper, exe);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_helper_runs_from_a_copy() {
+        let dir = unique_temp_dir("helper-windows");
+        let source = dir.join("dybur.exe");
+        fs::write(&source, b"helper").unwrap();
+
+        let helper =
+            helper_executable_for(InstallPlatform::WindowsPortable, &source, &dir).unwrap();
+
+        assert_ne!(helper, source);
+        assert_eq!(fs::read(&helper).unwrap(), b"helper");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_helper_started_rejects_helper_that_exits_immediately() {
+        let mut child = Command::new("true").spawn().unwrap();
+
+        let error =
+            ensure_helper_started(&mut child, Path::new("true"), Duration::from_millis(300))
+                .unwrap_err();
+
+        assert!(error.contains("exited right after launch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_helper_started_accepts_helper_still_running() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+
+        let result =
+            ensure_helper_started(&mut child, Path::new("sleep"), Duration::from_millis(100));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn failed_update_marker_round_trips_and_clears() {
+        let dir = unique_temp_dir("failed-marker");
+
+        assert_eq!(failed_update_version(&dir), None);
+        record_failed_update(&dir, "1.3.8");
+        assert_eq!(failed_update_version(&dir).as_deref(), Some("1.3.8"));
+        clear_failed_update(&dir);
+        assert_eq!(failed_update_version(&dir), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_update_dir_removes_leftovers_but_keeps_failed_marker() {
+        let dir = unique_temp_dir("clean-updates");
+        fs::write(dir.join("dybur-helper-123.exe"), b"helper").unwrap();
+        fs::write(dir.join("dybur-macos-arm64.dmg"), b"dmg").unwrap();
+        fs::create_dir_all(dir.join("stale-dir")).unwrap();
+        record_failed_update(&dir, "1.3.8");
+
+        clean_update_dir(&dir);
+
+        let remaining: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining, vec![FAILED_UPDATE_MARKER.to_string()]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn can_install_update_rejects_disk_image_and_translocated_apps() {
+        for exe in [
+            "/Volumes/dybur/dybur.app/Contents/MacOS/dybur",
+            "/private/var/folders/ab/T/AppTranslocation/1234/d/dybur.app/Contents/MacOS/dybur",
+        ] {
+            let error = can_install_update_at(InstallPlatform::MacDmg, Path::new(exe)).unwrap_err();
+            assert!(error.contains("Applications"), "{}", error);
+        }
+    }
+
+    #[test]
+    fn can_install_update_accepts_writable_install_folder() {
+        let dir = unique_temp_dir("install-writable");
+        let exe = dir.join("dybur.app/Contents/MacOS/dybur");
+
+        assert!(can_install_update_at(InstallPlatform::MacDmg, &exe).is_ok());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "probe file left behind"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn can_install_update_rejects_read_only_install_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("install-readonly");
+        let exe = dir.join("dybur.exe");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = can_install_update_at(InstallPlatform::WindowsPortable, &exe);
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.unwrap_err().contains("not writable"));
+    }
+
+    #[test]
     fn helper_install_args_target_parent_macos_app_bundle() {
         let args = helper_install_args_for(
             InstallPlatform::MacDmg,
+            "1.3.8",
             77,
             PathBuf::from("/tmp/dybur.dmg"),
             PathBuf::from("/Users/user/.dybur/bin/dybur.app/Contents/MacOS/dybur"),
@@ -1048,6 +1332,7 @@ mod tests {
     fn macos_relaunch_uses_open_on_app_bundle() {
         let args = HelperInstallArgs {
             platform: InstallPlatform::MacDmg,
+            version: "1.3.8".to_string(),
             pid: 77,
             artifact_path: PathBuf::from("/tmp/dybur.dmg"),
             target_exe_path: PathBuf::from("/Applications/dybur.app/Contents/MacOS/dybur"),

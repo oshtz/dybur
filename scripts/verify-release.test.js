@@ -27,6 +27,13 @@ const baseUpdateManifest = {
   },
 };
 
+const legacyUpdateManifest = {
+  ...baseUpdateManifest,
+  platforms: {
+    'windows-x64': baseUpdateManifest.platforms['windows-x64'],
+  },
+};
+
 const baseRelease = {
   tag_name: 'v1.2.1',
   published_at: '2026-05-29T18:43:15Z',
@@ -47,14 +54,28 @@ const baseRelease = {
         'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-windows-x64.exe',
     },
     {
-      name: 'dybur-update.json',
+      name: 'dybur-update-v2.json',
       size: 700,
       browser_download_url:
-        'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-update.json',
+        'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-update-v2.json',
       content: baseUpdateManifest,
+    },
+    {
+      name: 'dybur-update.json',
+      size: 400,
+      browser_download_url:
+        'https://github.com/oshtz/dybur/releases/download/v1.2.1/dybur-update.json',
+      content: legacyUpdateManifest,
     },
   ],
 };
+
+function withManifest(name, content) {
+  return {
+    ...baseRelease,
+    assets: baseRelease.assets.map((asset) => (asset.name === name ? { ...asset, content } : asset)),
+  };
+}
 
 function makeTempFixture(t, { packageJson = { version: '1.2.1' }, release = baseRelease }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dybur-release-verify-'));
@@ -129,7 +150,13 @@ describe('verify-release', () => {
     assert.equal(summary.expectedTag, 'v1.2.1');
     assert.equal(summary.actualTag, 'v1.2.1');
     assert.deepEqual(summary.issues, []);
-    assert.equal(summary.manifestCheck.ok, true);
+    assert.deepEqual(
+      summary.manifestChecks.map((check) => [check.name, check.checked, check.ok]),
+      [
+        ['dybur-update-v2.json', true, true],
+        ['dybur-update.json', true, true],
+      ]
+    );
   });
 
   it('fails when the latest release tag does not match the package version', (t) => {
@@ -173,6 +200,26 @@ describe('verify-release', () => {
     const fixture = makeTempFixture(t, {
       release: {
         ...baseRelease,
+        assets: baseRelease.assets.filter((asset) => asset.name !== 'dybur-update-v2.json'),
+      },
+    });
+
+    const result = runVerifier([
+      '--package-json',
+      fixture.packageJsonPath,
+      '--release-json',
+      fixture.releaseJsonPath,
+      '--skip-download-urls',
+    ]);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /Missing update manifest: dybur-update-v2\.json/);
+  });
+
+  it('fails when the legacy update manifest asset is missing', (t) => {
+    const fixture = makeTempFixture(t, {
+      release: {
+        ...baseRelease,
         assets: baseRelease.assets.filter((asset) => asset.name !== 'dybur-update.json'),
       },
     });
@@ -186,27 +233,12 @@ describe('verify-release', () => {
     ]);
 
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /Missing update manifest: dybur-update\.json/);
+    assert.match(result.stdout, /Missing legacy update manifest: dybur-update\.json/);
   });
 
-  it('fails when the update manifest omits a required platform', (t) => {
+  it('fails when the legacy update manifest lists macOS', (t) => {
     const fixture = makeTempFixture(t, {
-      release: {
-        ...baseRelease,
-        assets: baseRelease.assets.map((asset) =>
-          asset.name === 'dybur-update.json'
-            ? {
-                ...asset,
-                content: {
-                  ...baseUpdateManifest,
-                  platforms: {
-                    'windows-x64': baseUpdateManifest.platforms['windows-x64'],
-                  },
-                },
-              }
-            : asset
-        ),
-      },
+      release: withManifest('dybur-update.json', baseUpdateManifest),
     });
 
     const result = runVerifier([
@@ -218,7 +250,24 @@ describe('verify-release', () => {
     ]);
 
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /Update manifest missing platform darwin-arm64/);
+    assert.match(result.stdout, /dybur-update\.json must not list platform darwin-arm64/);
+  });
+
+  it('fails when the update manifest omits a required platform', (t) => {
+    const fixture = makeTempFixture(t, {
+      release: withManifest('dybur-update-v2.json', legacyUpdateManifest),
+    });
+
+    const result = runVerifier([
+      '--package-json',
+      fixture.packageJsonPath,
+      '--release-json',
+      fixture.releaseJsonPath,
+      '--skip-download-urls',
+    ]);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /dybur-update-v2\.json missing platform darwin-arm64/);
   });
 
   it('fails when a stable asset is too small', (t) => {
