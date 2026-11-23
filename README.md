@@ -24,11 +24,22 @@ Download the latest release from [GitHub Releases](https://github.com/oshtz/dybu
 dybur checks for updates automatically when the tray app starts. You can also run
 a manual check from the tray menu with **Check for Updates...**.
 
-Updates are installed from the public `dybur-update.json` manifest attached to the
-latest GitHub release. The manifest points to the stable platform artifacts:
+Updates are installed from the public `dybur-update-v2.json` manifest attached to
+the latest GitHub release. The manifest points to the stable platform artifacts:
 
 - `dybur-windows-x64.exe` for the portable Windows app
 - `dybur-macos-arm64.dmg` for the macOS installer
+
+Releases also publish a Windows-only `dybur-update.json` for dybur 1.3.0-1.3.7,
+which read that file. The macOS updater in those versions cannot install updates
+and quits the app on every launch when one is offered, so macOS users on those
+versions must install 1.3.8 or later manually once.
+
+Automatic startup checks are skipped while first-run setup is unfinished, while a
+model is downloading, and when dybur runs from a location it cannot replace (the
+mounted DMG, a translocated app outside Applications, or a read-only folder). If an
+install fails, the helper relaunches the existing app and automatic checks skip
+that version; **Check for Updates...** retries it.
 
 Downloaded artifacts are verified with SHA-256 before installation. On Windows,
 dybur exits and a helper process replaces the portable EXE, then relaunches the

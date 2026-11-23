@@ -8,7 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const DEFAULT_REPO = 'oshtz/dybur';
-const UPDATE_MANIFEST_ASSET = 'dybur-update.json';
+const UPDATE_MANIFEST_ASSET = 'dybur-update-v2.json';
+const LEGACY_UPDATE_MANIFEST_ASSET = 'dybur-update.json';
 
 const EXPECTED_ASSETS = [
   {
@@ -26,16 +27,36 @@ const EXPECTED_ASSETS = [
     label: 'update manifest',
     minSizeBytes: 100,
   },
+  {
+    name: LEGACY_UPDATE_MANIFEST_ASSET,
+    label: 'legacy update manifest',
+    minSizeBytes: 100,
+  },
 ];
 
-const REQUIRED_UPDATE_PLATFORMS = [
+const WINDOWS_UPDATE_PLATFORM = {
+  key: 'windows-x64',
+  assetName: 'dybur-windows-x64.exe',
+};
+
+const MACOS_UPDATE_PLATFORM = {
+  key: 'darwin-arm64',
+  assetName: 'dybur-macos-arm64.dmg',
+};
+
+// dybur 1.3.8+ reads the v2 manifest. 1.3.0-1.3.7 read the legacy manifest, and
+// their macOS updater cannot install (it quits the app on every launch when
+// offered an update), so the legacy manifest must never list macOS.
+const UPDATE_MANIFESTS = [
   {
-    key: 'windows-x64',
-    assetName: 'dybur-windows-x64.exe',
+    name: UPDATE_MANIFEST_ASSET,
+    requiredPlatforms: [WINDOWS_UPDATE_PLATFORM, MACOS_UPDATE_PLATFORM],
+    forbiddenPlatformKeys: [],
   },
   {
-    key: 'darwin-arm64',
-    assetName: 'dybur-macos-arm64.dmg',
+    name: LEGACY_UPDATE_MANIFEST_ASSET,
+    requiredPlatforms: [WINDOWS_UPDATE_PLATFORM],
+    forbiddenPlatformKeys: [MACOS_UPDATE_PLATFORM.key],
   },
 ];
 
@@ -262,7 +283,7 @@ function isSha256(value) {
   return typeof value === 'string' && /^[a-fA-F0-9]{64}$/.test(value);
 }
 
-function validateUpdateManifest({ manifest, expectedTag, assets }) {
+function validateUpdateManifest({ manifest, expectedTag, assets, spec }) {
   const issues = [];
   const expectedVersion = normalizeVersion(expectedTag);
   const actualVersion = normalizeVersion(manifest?.version);
@@ -272,48 +293,55 @@ function validateUpdateManifest({ manifest, expectedTag, assets }) {
     return {
       ok: false,
       checked: true,
-      issues: ['Update manifest is not a JSON object'],
+      issues: [`${spec.name} is not a JSON object`],
     };
   }
 
   if (actualVersion !== expectedVersion) {
     issues.push(
-      `Update manifest version ${manifest.version ?? '<missing>'} does not match ${expectedTag}`
+      `${spec.name} version ${manifest.version ?? '<missing>'} does not match ${expectedTag}`
     );
   }
 
   if (!manifest.platforms || typeof manifest.platforms !== 'object') {
-    issues.push('Update manifest is missing platforms');
+    issues.push(`${spec.name} is missing platforms`);
   }
 
-  for (const required of REQUIRED_UPDATE_PLATFORMS) {
+  for (const forbiddenKey of spec.forbiddenPlatformKeys) {
+    if (manifest.platforms?.[forbiddenKey]) {
+      issues.push(`${spec.name} must not list platform ${forbiddenKey}`);
+    }
+  }
+
+  for (const required of spec.requiredPlatforms) {
     const platform = manifest.platforms?.[required.key];
     if (!platform) {
-      issues.push(`Update manifest missing platform ${required.key}`);
+      issues.push(`${spec.name} missing platform ${required.key}`);
       continue;
     }
 
     if (typeof platform.url !== 'string' || platform.url.length === 0) {
-      issues.push(`Update manifest platform ${required.key} is missing url`);
+      issues.push(`${spec.name} platform ${required.key} is missing url`);
     } else if (!platform.url.endsWith(`/${required.assetName}`)) {
       issues.push(
-        `Update manifest platform ${required.key} URL does not point to ${required.assetName}`
+        `${spec.name} platform ${required.key} URL does not point to ${required.assetName}`
       );
     }
 
     if (!isSha256(platform.sha256)) {
-      issues.push(`Update manifest platform ${required.key} has invalid sha256`);
+      issues.push(`${spec.name} platform ${required.key} has invalid sha256`);
     }
 
     const releaseAsset = assetByName.get(required.assetName);
     if (releaseAsset && Number.isFinite(platform.size) && platform.size !== releaseAsset.size) {
       issues.push(
-        `Update manifest platform ${required.key} size ${platform.size} does not match release asset ${releaseAsset.size}`
+        `${spec.name} platform ${required.key} size ${platform.size} does not match release asset ${releaseAsset.size}`
       );
     }
   }
 
   return {
+    name: spec.name,
     ok: issues.length === 0,
     checked: true,
     version: manifest.version ?? null,
@@ -322,7 +350,7 @@ function validateUpdateManifest({ manifest, expectedTag, assets }) {
   };
 }
 
-async function readUpdateManifest({ manifestAsset, options }) {
+async function readUpdateManifest({ manifestAsset, options, name }) {
   if (!manifestAsset) {
     return null;
   }
@@ -336,7 +364,7 @@ async function readUpdateManifest({ manifestAsset, options }) {
   }
 
   return fetchDownloadJson(
-    `https://github.com/${options.repo}/releases/latest/download/${UPDATE_MANIFEST_ASSET}`
+    `https://github.com/${options.repo}/releases/latest/download/${name}`
   );
 }
 
@@ -403,24 +431,22 @@ async function verifyRelease({ expectedTag, options, release }) {
     }
   }
 
-  let manifestCheck = {
-    ok: false,
-    checked: false,
-    issues: [],
-  };
-  const manifestAsset = assetByName.get(UPDATE_MANIFEST_ASSET);
-  if (manifestAsset) {
-    const manifest = await readUpdateManifest({ manifestAsset, options });
+  const manifestChecks = [];
+  for (const spec of UPDATE_MANIFESTS) {
+    const manifestAsset = assetByName.get(spec.name);
+    if (!manifestAsset) {
+      manifestChecks.push({ name: spec.name, ok: false, checked: false, issues: [] });
+      continue;
+    }
+
+    const manifest = await readUpdateManifest({ manifestAsset, options, name: spec.name });
     if (manifest) {
-      manifestCheck = validateUpdateManifest({ manifest, expectedTag, assets });
-      issues.push(...manifestCheck.issues);
+      const check = validateUpdateManifest({ manifest, expectedTag, assets, spec });
+      manifestChecks.push(check);
+      issues.push(...check.issues);
     } else {
-      manifestCheck = {
-        ok: true,
-        checked: false,
-        issues: [],
-      };
-      warnings.push('Update manifest content was not checked');
+      manifestChecks.push({ name: spec.name, ok: true, checked: false, issues: [] });
+      warnings.push(`${spec.name} content was not checked`);
     }
   }
 
@@ -432,7 +458,7 @@ async function verifyRelease({ expectedTag, options, release }) {
     htmlUrl: release.html_url ?? null,
     assets,
     downloadChecks,
-    manifestCheck,
+    manifestChecks,
     warnings,
     issues,
   };
@@ -466,13 +492,14 @@ function renderText(summary) {
     }
   }
 
-  if (summary.manifestCheck?.checked) {
-    lines.push(
-      '',
-      `Update manifest: ${summary.manifestCheck.ok ? 'OK' : 'FAIL'}${
-        summary.manifestCheck.version ? ` (${summary.manifestCheck.version})` : ''
-      }`
-    );
+  const checkedManifests = (summary.manifestChecks ?? []).filter((check) => check.checked);
+  if (checkedManifests.length > 0) {
+    lines.push('', 'Update manifests:');
+    for (const check of checkedManifests) {
+      lines.push(
+        `  - ${check.name}: ${check.ok ? 'OK' : 'FAIL'}${check.version ? ` (${check.version})` : ''}`
+      );
+    }
   }
 
   if (summary.warnings.length > 0) {

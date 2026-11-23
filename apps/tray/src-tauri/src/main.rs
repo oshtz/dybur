@@ -901,6 +901,18 @@ fn start_update_check(app: tauri::AppHandle, interactive: bool) {
                 log_info!("updates", "Automatic update check disabled by environment");
                 return;
             }
+            // Leftovers from the previous update (helper copies, installers) are no
+            // longer needed once this build is up and running.
+            updater::clean_update_dir(&updater::update_work_dir());
+            // Installing an update quits the app, which would close the setup window
+            // and kill a model download. Wait for the next launch instead.
+            if ftue::should_show_ftue() {
+                log_info!(
+                    "updates",
+                    "Skipping automatic update check until setup is complete"
+                );
+                return;
+            }
         }
 
         if let Err(error) = run_update_check(&app, interactive) {
@@ -924,9 +936,21 @@ fn run_update_check(app: &tauri::AppHandle, interactive: bool) -> Result<(), Str
         return Ok(());
     };
 
-    if is_recording_or_processing(app) {
+    if !interactive
+        && updater::failed_update_version(&updater::update_work_dir()).as_deref()
+            == Some(update.version.as_str())
+    {
+        log_info!(
+            "updates",
+            "Skipping automatic install of v{}: a previous install failed. Use Check for Updates to retry.",
+            update.version
+        );
+        return Ok(());
+    }
+
+    if is_recording_or_processing(app) || is_download_in_progress() {
         let message =
-            "Update available, but dybur is recording or processing. Try again when idle.";
+            "Update available, but dybur is busy recording, processing, or downloading a model. Try again when idle.";
         log_info!("updates", "{}", message);
         if interactive {
             show_user_alert("dybur Update", message);
@@ -936,6 +960,21 @@ fn run_update_check(app: &tauri::AppHandle, interactive: bool) -> Result<(), Str
 
     let platform = updater::install_platform_for_key(&update.platform_key)
         .ok_or_else(|| format!("Unsupported update platform: {}", update.platform_key))?;
+
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to locate current executable: {}", e))?;
+    if let Err(message) = updater::can_install_update_at(platform, &current_exe) {
+        log_info!(
+            "updates",
+            "Update v{} available but not installable: {}",
+            update.version,
+            message
+        );
+        if interactive {
+            show_user_alert("dybur Update", &message);
+        }
+        return Ok(());
+    }
 
     log_info!(
         "updates",
@@ -949,10 +988,9 @@ fn run_update_check(app: &tauri::AppHandle, interactive: bool) -> Result<(), Str
     );
 
     let artifact_path = updater::download_update_artifact(&update, &updater::update_work_dir())?;
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("Failed to locate current executable: {}", e))?;
     let helper_args = updater::helper_install_args_for(
         platform,
+        &update.version,
         std::process::id(),
         artifact_path,
         current_exe.clone(),

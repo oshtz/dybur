@@ -695,6 +695,15 @@ jobs:
             echo "Created release DMG: $RELEASE_DMG_PATH"
           fi
 
+      - name: Smoke-test macOS update helper
+        if: steps.find-artifacts.outputs.dmg_path != ''
+        run: |
+          args=("${{ steps.find-artifacts.outputs.dmg_path }}")
+          if [ "${{ steps.apple-secrets.outputs.available }}" = "true" ]; then
+            args+=(--require-signature)
+          fi
+          bash scripts/smoke-macos-updater.sh "${args[@]}"
+
       - name: Upload macOS DMG
         if: steps.find-artifacts.outputs.dmg_path != ''
         uses: actions/upload-artifact@v4
@@ -833,8 +842,20 @@ jobs:
             },
           };
 
-          fs.writeFileSync('dybur-update.json', `${JSON.stringify(manifest, null, 2)}\n`);
+          // dybur-update-v2.json is read by 1.3.8+, whose macOS updater works.
+          fs.writeFileSync('dybur-update-v2.json', `${JSON.stringify(manifest, null, 2)}\n`);
           console.log(JSON.stringify(manifest, null, 2));
+
+          // dybur-update.json is read by 1.3.0-1.3.7. Their macOS updater cannot
+          // install (the copied helper is killed by code signing) and quits the app
+          // on every launch when offered an update, so the legacy manifest is
+          // Windows-only. Mac users on those versions update manually once.
+          const legacyManifest = {
+            ...manifest,
+            platforms: { 'windows-x64': manifest.platforms['windows-x64'] },
+          };
+          fs.writeFileSync('dybur-update.json', `${JSON.stringify(legacyManifest, null, 2)}\n`);
+          console.log(JSON.stringify(legacyManifest, null, 2));
           NODE
 
       - name: Publish update manifest
@@ -844,3 +865,4 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.tag }}
           files: |
             dybur-update.json
+            dybur-update-v2.json
